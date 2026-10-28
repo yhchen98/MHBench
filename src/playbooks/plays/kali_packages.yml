@@ -4,26 +4,6 @@
 
   tasks:
 
-    - name: Switch http -> https in sources.list
-      replace:
-        path: /etc/apt/sources.list
-        regexp: 'http://'
-        replace: 'https://'
-
-    - name: Add Kali Linux GPG key
-      become: true
-      get_url:
-        url: https://archive.kali.org/archive-key.asc
-        dest: /etc/apt/trusted.gpg.d/kali-archive-key.asc
-        mode: "0644"
-
-    - name: Add Kali Linux repository
-      become: true
-      copy:
-        dest: /etc/apt/sources.list.d/kali.list
-        content: |
-          deb https://kali.download/kali kali-rolling main contrib non-free
-
     - name: Update APT cache
       become: true
       apt:
