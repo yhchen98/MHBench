@@ -81,13 +81,7 @@ class NetworkDeployer:
                 if time.monotonic() > deadline:
                     raise TimeoutError("Router did not return to ACTIVE after attaching 'management_subnet'.")
                 time.sleep(2)
-            logger.info("Router ACTIVE after management_subnet attach — waiting for DHCP agent...")
-            deadline = time.monotonic() + 60
-            while not list(self._conn.network.network_hosting_dhcp_agents(os_mgmt_net.id)):
-                if time.monotonic() > deadline:
-                    raise TimeoutError("DHCP agent did not pick up 'management_network' within 60s.")
-                time.sleep(2)
-            logger.info("DHCP agent ready for management_network")
+            logger.info("OVN: skip legacy DHCP-agent check; verify after VM boot.")
 
         for subnet in topology.get_all_subnets():
             logger.info("Creating network '%s'...", self._n(subnet.name))
@@ -120,13 +114,7 @@ class NetworkDeployer:
                 if time.monotonic() > deadline:
                     raise TimeoutError(f"Router did not return to ACTIVE after attaching '{self._n(subnet.name)}'.")
                 time.sleep(2)
-            logger.info("Router ACTIVE after '%s' attach — waiting for DHCP agent...", self._n(subnet.name))
-            deadline = time.monotonic() + 60
-            while not list(self._conn.network.network_hosting_dhcp_agents(os_net.id)):
-                if time.monotonic() > deadline:
-                    raise TimeoutError(f"DHCP agent did not pick up '{self._n(subnet.name)}' within 60s.")
-                time.sleep(2)
-            logger.info("DHCP agent ready for '%s'", self._n(subnet.name))
+            logger.info("OVN: skip legacy DHCP-agent check; verify after VM boot.")
 
         for subnet in topology.get_all_subnets():
             logger.info("Creating security group '%s'...", self._n(subnet.sg_name))
