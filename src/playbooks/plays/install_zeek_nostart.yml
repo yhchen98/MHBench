@@ -49,7 +49,7 @@
       lineinfile:
         path: /etc/environment
         regexp: '^PATH='
-        line: 'PATH="/usr/local/zeek/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
+        line: 'PATH="/opt/zeek/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
 
     - name: Ensure Zeek does not start on boot
       systemd:

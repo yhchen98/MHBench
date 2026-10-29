@@ -19,5 +19,5 @@
       ignore_errors: yes
 
     - name: Start Zeek via zeekctl if systemd unit absent
-      command: /usr/local/zeek/bin/zeekctl deploy
+      command: /opt/zeek/bin/zeekctl deploy
       ignore_errors: yes

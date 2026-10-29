@@ -56,8 +56,13 @@
   disk_size_gb: 16
   location: src/compilation/images/webserver_telemetry.qcow2
 - name: sensor
-  parent: ubuntu_telemetry
+  parent: ubuntu24
   playbooks:
+  - enable_root_ssh
+  - install_base_packages
+  - enable_host_logging
+  - install_sysflow_nostart
+  - install_falco_nostart
   - install_zeek_nostart
   - install_suricata_nostart
   - install_filebeat_nostart
