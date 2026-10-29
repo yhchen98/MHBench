@@ -24,7 +24,7 @@ class NetworkDeployer:
         return f"{self._project_name}-{name}" if self._project_name else name
 
     def deploy(self, topology: NetworkTopology) -> None:
-        ext_net = self._conn.network.find_network("external")
+        ext_net = self._conn.network.find_network("public")
         if not ext_net:
             raise RuntimeError("External network 'external' not found in OpenStack.")
 

@@ -134,7 +134,7 @@ class HostDeployer:
                 elif current.status == "ERROR":
                     raise RuntimeError(f"'{self._n('management_host')}' entered ERROR: {getattr(current, 'fault', 'unknown')}")
 
-            ext_net = self._conn.network.find_network("external")
+            ext_net = self._conn.network.find_network("public")
             if not ext_net:
                 raise RuntimeError("External network 'external' not found.")
             time.sleep(1)
