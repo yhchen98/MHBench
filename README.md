@@ -75,7 +75,11 @@ Every other section ships with working defaults — see the inline comments in [
 - **Offline registry** ([src/registry/offline_registry.yaml](src/registry/offline_registry.yaml)) — VM images built ahead of time. Each entry declares a parent image and a list of playbooks layered on top. Plays here are **network-independent**: they install and configure software but never start anything that needs awareness of the live host (IP, user, peers). `compile` walks this graph to produce `.qcow2` files.
 - **Online registry** ([src/registry/online_registry.yaml](src/registry/online_registry.yaml)) — runtime VM types that reference an offline image plus playbooks that run **after boot**, once the VM exists in its deployed topology. This is where services are started and host-specific state (credentials, shells, IP-aware config) is applied. Topology specs refer to these via `vm_type`.
 - **Playbook registry** ([src/registry/playbook_registry.yaml](src/registry/playbook_registry.yaml)) — named Ansible plays available to both registries.
-- **Environment spec** — a JSON file under [environments/](environments/) describing networks, subnets, hosts, and the VM type for each host. Examples live in [environments/non-generated/](environments/non-generated/) and [environments/generated/](environments/generated/).
+- **Environment spec** — a JSON file under [environments/](environments/) describing networks, subnets, hosts, and the VM type for each host. Examples live in [environments/non-generated/](environments/non-generated/) and [environments/generated/](environments/generated/). Connections in `subnet_connections` allow initiation from `from_subnet` to `to_subnet`; `bidirectional` defaults to true. `protocol` limits the IP protocol, and `ports` lists discrete destination ports for TCP, UDP, or SCTP. Null protocol/ports leave a connection unrestricted; replies to allowed connections are stateful.
+
+Hosts within a subnet can communicate freely. `external: true` permits ingress from any IPv4 source. Independently, `internet_egress: false` restricts new outbound connections to topology CIDRs and the management host, with DHCP preserved; public DNS servers are not exempt. Provider infrastructure differs: GCP always permits its metadata/DNS endpoint.
+
+The management host retains access to topology hosts for SSH and defender-requested forwarding. Its ingress permits public SSH, victim telemetry on TCP/9200, and explicitly requested forwarding ports from victim subnets. By default, victims can connect to `attacker_subnet` for callbacks, and `defender_subnet` can connect to victims; neither default connects attacker and defender. Explicit connections for either subnet pair replace that pair's role defaults in both directions. External ingress and management access remain separate exceptions.
 
 ## CLI
 
@@ -170,11 +174,7 @@ v3_MHBench/
 
 ## Backends
 
-MHBench provisions through a single `CloudBackend` interface, chosen by the
-`backend:` config key. The OpenStack path is unchanged from earlier versions;
-the Google Cloud path implements the same interface with GCP primitives. The
-CLI, Ansible configuration, topology specs, and registries are identical across
-backends — only `config.yaml` changes.
+MHBench provisions through a single `CloudBackend` interface, chosen by the `backend:` config key. OpenStack and Google Cloud implement this interface using their own networking and compute primitives. The CLI, Ansible configuration, topology specs, and registries are identical across backends — only `config.yaml` changes.
 
 ### How the GCP backend maps a topology
 
