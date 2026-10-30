@@ -35,6 +35,12 @@
   - enable_host_logging
   disk_size_gb: 12
   location: src/compilation/images/ubuntu_base.qcow2
+- name: frr_router
+  parent: ubuntu_base
+  playbooks:
+  - install_frr
+  disk_size_gb: null
+  location: null
 - name: webserver
   parent: ubuntu_base
   playbooks:
