@@ -121,7 +121,10 @@ class NetworkTopology(BaseModel):
                         "from_subnet": connection.to_subnet, "to_subnet": subnet_name,
                         "bidirectional": False,
                     }))
+        data_names = self.routing.data_subnet_names(self) if self.routing is not None else set()
         for source in self.get_all_subnets():
+            if subnet_name in data_names or source.name in data_names:
+                continue
             if source.name == subnet_name or source.name in explicit_peers:
                 continue
             callback = (subnet_name == "attacker_subnet" and not source.external

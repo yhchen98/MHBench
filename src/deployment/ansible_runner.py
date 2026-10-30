@@ -17,6 +17,7 @@ from config.config import Config
 from src.abstractions.network import NetworkTopology
 from src.deployment.backends.base import CloudBackend
 from src.deployment.online_registry_service import OnlineRegistryService
+from src.deployment.routing import guest_configurations
 from src.playbooks.playbook_registry_service import PlaybookRegistryService
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ class AnsibleRunner:
         backend: CloudBackend | None = None,
         project_name: str | None = None,
     ) -> None:
+        self._config = config
         self._ssh_key_path = config.ssh_key_path
         self._online = online_registry
         self._playbook_registry = playbook_registry
@@ -163,6 +165,22 @@ class AnsibleRunner:
             if logf:
                 logf.close()
 
+    def _configure_routing(self, topology: NetworkTopology, inventory_hosts: dict) -> None:
+        if topology.routing is None or self._attacker_only:
+            return
+        if self._backend is None or self._backend.name != "openstack":
+            raise NotImplementedError("BGP routing configuration requires the OpenStack backend.")
+        actual = self._backend.routing_interfaces(topology)
+        guests = guest_configurations(topology, self._config, actual)
+        project_dir = str((_MHBENCH_DIR / self._playbook_registry.get_path("configure_routing")).resolve().parent)
+        inventory = {"all": {"hosts": inventory_hosts}}
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, args in guests.items():
+                self._run_playbook("configure_routing", inventory, {"host": name, **args}, tmp, project_dir)
+            for router in topology.routing.routers:
+                self._run_playbook("verify_bgp", inventory, {"host": router.host, **guests[router.host]},
+                                   tmp, project_dir)
+
     def run(self, topology: NetworkTopology, mgmt_floating_ip: str) -> None:
         hosts = topology.get_all_hosts()
         for host in hosts:
@@ -197,6 +215,8 @@ class AnsibleRunner:
             }
             for host in hosts
         }
+
+        self._configure_routing(topology, inventory_hosts)
 
         queue: list[tuple[str | None, str, dict]] = []
         for host in hosts:
@@ -411,6 +431,8 @@ class AnsibleRunner:
             }
             for host in hosts
         }
+
+        self._configure_routing(topology, inventory_hosts)
 
         # Per-host chain = check_if_host_up then that host's online plays, ordered (a host's own plays are
         # sequential; only across hosts is it parallel). Topology plays are cross-host and run after, serially.

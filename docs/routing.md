@@ -40,3 +40,13 @@ Permit rules are confined to declared data LAN prefixes. Peering/control network
 Routing policies govern route exchange. `subnet_connections` separately governs application protocol, destination ports, and initiation direction. A route does not grant application access.
 
 End hosts use their AS router as their sole default gateway. Explicit control routes preserve management/C2 access through the control network. Numeric C2 endpoints must be outside the data plane; DNS-named endpoints require explicit control destination prefixes, whose coverage must be checked before changing guest routes. End hosts do not run BGP. Dynamic add/rebuild/remove-host operations are unsupported for routed environments.
+
+## Deployment
+
+Build and upload `frr_router` through the [normal image workflow](../README.md#compile-images) before deploying a routed environment. The profile contains FRR; the environment supplies its configuration. Set `openstack.external_network` to the site's external network name; leaving it unset retains `external`.
+
+Provisioning creates separate Neutron networks for the data LANs and peering links, with no DHCP, Neutron gateway, router attachment, or floating IP. Configuration reads each port's MAC and the actual control gateway, applies persistent MAC-matched Netplan settings, enables Linux forwarding on routers, and starts FRR. It then waits for declared BGP sessions and initial origin routes. Use the existing `deploy` command, or `provision` followed by `configure`, including the management IP.
+
+Control routes preserve primary-address SSH, C2, and telemetry access. DNS-named C2 endpoints must resolve to IPv4 addresses covered by the declared control routes before cutover. Route exceptions do not grant security-group egress: control services must also be reachable under the control subnet's connectivity policy. End hosts have one data default; routers retain a control default but reject forwarding to or from their control NIC. No experimental destination can use a control-route exception.
+
+Router data ports have port security disabled to carry transit packets with other hosts' source addresses. Control ports and end-host data ports retain security groups and port security. Data LAN groups enforce explicit application connections without management or role-based exceptions. Router guest rules restrict data-plane SSH and BGP access; root access to a router remains administrative access, not an isolated attacker privilege.

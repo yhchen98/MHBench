@@ -74,6 +74,10 @@ class CloudBackend(ABC):
     def teardown_network(self, topology: NetworkTopology) -> None:
         """Delete the networks, subnets, routing and firewalling for ``topology``."""
 
+    def routing_interfaces(self, topology: NetworkTopology) -> dict[str, dict]:
+        """Return actual interface MACs and control gateways for routed guest configuration."""
+        raise NotImplementedError(f"{self.name} backend does not support BGP routing")
+
     # -- Ansible support ----------------------------------------------------
 
     @abstractmethod

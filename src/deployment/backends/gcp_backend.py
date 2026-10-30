@@ -163,6 +163,8 @@ class GCPBackend(CloudBackend):
     # -- networking ---------------------------------------------------------
 
     def provision_network(self, topology: NetworkTopology) -> None:
+        if topology.routing is not None:
+            raise NotImplementedError("BGP routing is not supported by the GCP backend.")
         c = self._compute
         logger.info("Creating VPC network '%s'...", self._net_name())
         self._wait(self._networks.insert(project=self._project, network_resource=c.Network(
@@ -316,6 +318,8 @@ class GCPBackend(CloudBackend):
 
     def teardown_network(self, topology: NetworkTopology) -> None:
         # Reverse order: router, firewalls, subnetworks, network. Missing == fine.
+        if topology.routing is not None:
+            raise NotImplementedError("BGP routing is not supported by the GCP backend.")
         self._delete(lambda: self._routers.delete(project=self._project, region=self._region, router=self._n("router")),
                      f"router {self._n('router')}")
         fw_names = []
@@ -452,6 +456,8 @@ class GCPBackend(CloudBackend):
 
     def provision_hosts(self, topology: NetworkTopology) -> str | None:
         # Build every instance spec up front (management first so we can return its external IP).
+        if topology.routing is not None:
+            raise NotImplementedError("BGP routing is not supported by the GCP backend.")
         specs: list[tuple[str, object]] = []
         if self._management:
             mgmt = self._management
@@ -507,6 +513,8 @@ class GCPBackend(CloudBackend):
         return None
 
     def teardown_hosts(self, topology: NetworkTopology) -> None:
+        if topology.routing is not None:
+            raise NotImplementedError("BGP routing is not supported by the GCP backend.")
         names = [self._inst(h.name) for h in topology.get_all_hosts()]
         if self._management:
             names.append(self._inst("management-host"))

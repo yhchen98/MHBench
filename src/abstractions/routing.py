@@ -159,6 +159,9 @@ class RoutingConfig(BaseModel):
                 addresses.add(ip)
 
         data_names = self.data_subnet_names(topology)
+        for connection in topology.subnet_connections:
+            if (connection.from_subnet in data_names) != (connection.to_subnet in data_names):
+                raise ValueError("subnet_connections cannot cross the control/data boundary")
         for name in data_names:
             subnet = subnets[name]
             if subnet.hosts or subnet.external or subnet.internet_egress:
