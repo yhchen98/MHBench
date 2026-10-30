@@ -5,6 +5,8 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
+from src.abstractions.routing import RoutingConfig
+
 
 class SubnetConnection(BaseModel):
     from_subnet: str
@@ -89,6 +91,7 @@ class NetworkTopology(BaseModel):
     networks: list[Network] = Field(default_factory=list)
     subnet_connections: list[SubnetConnection] = Field(default_factory=list)
     playbooks: list[PlaybookRef] = Field(default_factory=list)
+    routing: RoutingConfig | None = None
 
     @model_validator(mode="after")
     def validate_connections(self) -> NetworkTopology:
@@ -99,6 +102,8 @@ class NetworkTopology(BaseModel):
             for name in (connection.from_subnet, connection.to_subnet):
                 if name not in names:
                     raise ValueError(f"Connection references unknown subnet {name!r}")
+        if self.routing is not None:
+            self.routing.validate_topology(self)
         return self
 
     def get_ingress_connections(self, subnet_name: str) -> list[SubnetConnection]:
@@ -140,3 +145,6 @@ class NetworkTopology(BaseModel):
 
     def get_subnet_for_host(self, host: Host) -> Subnet | None:
         return next((s for s in self.get_all_subnets() if host in s.hosts), None)
+
+    def get_host_by_name(self, name: str) -> Host | None:
+        return next((h for h in self.get_all_hosts() if h.name == name), None)

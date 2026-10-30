@@ -77,7 +77,9 @@ Every other section ships with working defaults — see the inline comments in [
 - **Playbook registry** ([src/registry/playbook_registry.yaml](src/registry/playbook_registry.yaml)) — named Ansible plays available to both registries.
 - **Environment spec** — a JSON file under [environments/](environments/) describing networks, subnets, hosts, and the VM type for each host. Examples live in [environments/non-generated/](environments/non-generated/) and [environments/generated/](environments/generated/). Connections in `subnet_connections` allow initiation from `from_subnet` to `to_subnet`; `bidirectional` defaults to true. `protocol` limits the IP protocol, and `ports` lists discrete destination ports for TCP, UDP, or SCTP. Null protocol/ports leave a connection unrestricted; replies to allowed connections are stateful.
 
-Hosts within a subnet can communicate freely. `external: true` permits ingress from any IPv4 source. Independently, `internet_egress: false` restricts new outbound connections to topology CIDRs and the management host, with DHCP preserved; public DNS servers are not exempt. Provider infrastructure differs: GCP always permits its metadata/DNS endpoint.
+The optional [routing section](docs/routing.md) describes BGP routers, peering links, prefix policies, and end-host gateways for OpenStack. Omit it to retain the existing provider networking.
+
+Without a routing section, hosts within a subnet can communicate freely. `external: true` permits ingress from any IPv4 source. Independently, `internet_egress: false` restricts new outbound connections to topology CIDRs and the management host, with DHCP preserved; public DNS servers are not exempt. Provider infrastructure differs: GCP always permits its metadata/DNS endpoint.
 
 The management host retains access to topology hosts for SSH and defender-requested forwarding. Its ingress permits public SSH, victim telemetry on TCP/9200, and explicitly requested forwarding ports from victim subnets. By default, victims can connect to `attacker_subnet` for callbacks, and `defender_subnet` can connect to victims; neither default connects attacker and defender. Explicit connections for either subnet pair replace that pair's role defaults in both directions. External ingress and management access remain separate exceptions.
 
@@ -174,7 +176,7 @@ v3_MHBench/
 
 ## Backends
 
-MHBench provisions through a single `CloudBackend` interface, chosen by the `backend:` config key. OpenStack and Google Cloud implement this interface using their own networking and compute primitives. The CLI, Ansible configuration, topology specs, and registries are identical across backends — only `config.yaml` changes.
+MHBench provisions through a single `CloudBackend` interface, chosen by the `backend:` config key. OpenStack and Google Cloud implement this interface using their own networking and compute primitives. For environments without a routing section, the CLI, Ansible configuration, topology specs, and registries are identical across backends — only `config.yaml` changes. BGP routing specifications require OpenStack.
 
 ### How the GCP backend maps a topology
 
