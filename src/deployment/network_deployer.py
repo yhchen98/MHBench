@@ -128,137 +128,69 @@ class NetworkDeployer:
                 time.sleep(2)
             logger.info("DHCP agent ready for '%s'", self._n(subnet.name))
 
+        self._create_security_groups(topology)
+
+    def _new_security_group(self, name: str, description: str):
+        sg = self._conn.network.create_security_group(
+            name=self._n(name), description=description, stateful=True,
+        )
+        # Neutron seeds custom groups with rules too. Rebuild only this new group,
+        # before any ports use it, so inherited IPv4/IPv6 permissions cannot bypass policy.
+        for rule in sg.security_group_rules:
+            self._conn.network.delete_security_group_rule(rule["id"])
+        return sg
+
+    def _allow(self, sg, direction: str, prefix: str, protocol: str | None = None,
+               port: int | None = None) -> None:
+        rule = dict(security_group_id=sg.id, direction=direction, ether_type="IPv4",
+                    remote_ip_prefix=prefix, protocol=protocol)
+        if port is not None:
+            rule.update(port_range_min=port, port_range_max=port)
+        try:
+            self._conn.network.create_security_group_rule(**rule)
+        except ConflictException as exc:
+            if (exc.response is None or
+                    exc.response.json().get("NeutronError", {}).get("type") != "SecurityGroupRuleExists"):
+                raise
+        time.sleep(1)
+
+    def _create_security_groups(self, topology: NetworkTopology) -> None:
+        internal = {str(s.cidr) for s in topology.get_all_subnets()}
+        management_source = f"{self._management.host_ip}/32" if self._management else None
+        if management_source:
+            internal.add(management_source)
         for subnet in topology.get_all_subnets():
             logger.info("Creating security group '%s'...", self._n(subnet.sg_name))
-            sg = self._conn.network.create_security_group(
-                name=self._n(subnet.sg_name),
-                description=f"Security group for {subnet.name}",
-            )
-            time.sleep(1)
+            sg = self._new_security_group(subnet.sg_name, f"Security group for {subnet.name}")
+            for prefix in (["0.0.0.0/0"] if subnet.internet_egress else sorted(internal)):
+                self._allow(sg, "egress", prefix)
+            if not subnet.internet_egress:
+                # OVN does not implicitly permit the DHCP discovery broadcast.
+                self._allow(sg, "egress", "255.255.255.255/32", "udp", 67)
             if subnet.external:
-                for direction in ("ingress", "egress"):
-                    try:
-                        self._conn.network.create_security_group_rule(
-                            security_group_id=sg.id, direction=direction, remote_ip_prefix="0.0.0.0/0",
-                        )
-                    except ConflictException:
-                        pass
-                    time.sleep(1)
+                self._allow(sg, "ingress", "0.0.0.0/0")
             else:
-                egress_prefix = "0.0.0.0/0" if subnet.internet_egress else str(subnet.cidr)
-                try:
-                    self._conn.network.create_security_group_rule(
-                        security_group_id=sg.id, direction="egress", remote_ip_prefix=egress_prefix,
-                    )
-                except ConflictException:
-                    pass
-                time.sleep(1)
-                for prefix in [str(subnet.cidr)]:
-                    try:
-                        self._conn.network.create_security_group_rule(
-                            security_group_id=sg.id, direction="ingress", remote_ip_prefix=prefix,
-                        )
-                    except ConflictException:
-                        pass
-                    time.sleep(1)
-                peers: set[str] = set()
-                for conn in topology.subnet_connections:
-                    if conn.from_subnet == subnet.name:
-                        peers.add(conn.to_subnet)
-                    elif conn.bidirectional and conn.to_subnet == subnet.name:
-                        peers.add(conn.from_subnet)
-                # The C2 lives in the attacker subnet (c2_on_kali). A real C2 accepts beacons from
-                # ANY of its implants regardless of which victim subnet they land in, so open the
-                # attacker subnet's ingress to every other subnet instead of relying on each topology
-                # hand-authoring a subnet_connection to it. That authoring is easy to forget and
-                # silently blocks deep-tier sandcat agents from calling home: e.g. equifax connects
-                # attacker<->webserver but NOT corporate<->attacker, so pivoted DB-tier agents could
-                # never beacon to Kali:8888 -> 0 data-tier footholds / 0 exfil under c2_on_kali.
-                # (Segmentation realism belongs on victim EGRESS, not on the C2's ingress.)
-                if subnet.name == "attacker_subnet":
-                    # ...but NOT the defender subnet: the C2 accepts beacons from victim implants, not
-                    # from the defender box (which is isolated from the attacker in both directions).
-                    peers.update(s.name for s in topology.get_all_subnets()
-                                 if s.name not in (subnet.name, "defender_subnet") and not s.external)
-                # Mirror of the attacker expansion, for the defender: every VICTIM subnet accepts ingress
-                # FROM the defender box, so the defender can reach every tier for detection/active-response
-                # without each topology hand-authoring a connection (the same authoring trap the attacker
-                # expansion avoids). Excluded: the attacker subnet (defender<->attacker stays severed) and
-                # the defender's own subnet (victims must NOT be able to initiate back to the box — no ES
-                # injection). One-way: this opens the victim's INGRESS, not the box's.
-                has_defender = any(s.name == "defender_subnet" for s in topology.get_all_subnets())
-                if has_defender and subnet.name not in ("attacker_subnet", "defender_subnet"):
-                    peers.add("defender_subnet")
-                for peer_name in peers:
-                    peer = topology.get_subnet_by_name(peer_name)
-                    if peer:
-                        try:
-                            self._conn.network.create_security_group_rule(
-                                security_group_id=sg.id, direction="ingress", remote_ip_prefix=str(peer.cidr),
-                            )
-                        except ConflictException:
-                            pass
-                        time.sleep(1)
-                if self._management:
-                    try:
-                        self._conn.network.create_security_group_rule(
-                            security_group_id=sg.id, direction="ingress",
-                            remote_ip_prefix=self._management.cidr,
-                        )
-                    except ConflictException:
-                        pass
-                    time.sleep(1)
+                self._allow(sg, "ingress", str(subnet.cidr))
+                if management_source:
+                    # The bastion also forwards defender-requested ports to the box.
+                    self._allow(sg, "ingress", management_source)
+                for connection in topology.get_ingress_connections(subnet.name):
+                    source = topology.get_subnet_by_name(connection.from_subnet)
+                    for port in connection.ports or [None]:
+                        self._allow(sg, "ingress", str(source.cidr), connection.protocol, port)
             logger.info("Security group '%s' ready", self._n(subnet.sg_name))
 
         if self._management:
-            logger.info("Creating security group '%s'...", self._n("management_sg"))
-            mgmt_sg = self._conn.network.create_security_group(
-                name=self._n("management_sg"),
-                description="Security group for management network",
-            )
-            time.sleep(1)
-            # The mgmt host is the bastion (it holds the floating IP) AND the telemetry relay host, so it
-            # must NOT accept ingress from the whole internet. Scope it:
-            #   - egress: open (bastion needs outbound; SNAT egress for the box's LLM calls goes via here)
-            #   - ingress tcp/22: SSH for the harness/operator jump (key-only). The one internet-facing port.
-            #   - ingress tcp/9200: the telemetry relay, east-west from the VICTIM subnets + mgmt only.
-            # (Restricting 22 to a fixed operator CIDR would be tighter still, but the harness connects
-            # from varying hosts; 22 stays key-only from anywhere while everything else is closed.)
-            # The relay carries victim DETECTION telemetry to the defender, so the attacker subnet is
-            # deliberately excluded: the attacker is what's being detected and must never be able to POST
-            # into the defender's feed (a telemetry-injection/poisoning vector). If kali telemetry is
-            # ever wanted it belongs on a separate channel, not the defender's relay.
-            try:
-                self._conn.network.create_security_group_rule(
-                    security_group_id=mgmt_sg.id, direction="egress", remote_ip_prefix="0.0.0.0/0",
-                )
-            except ConflictException:
-                pass
-            time.sleep(1)
-            try:
-                self._conn.network.create_security_group_rule(
-                    security_group_id=mgmt_sg.id, direction="ingress", protocol="tcp",
-                    port_range_min=22, port_range_max=22, remote_ip_prefix="0.0.0.0/0",
-                )
-            except ConflictException:
-                pass
-            time.sleep(1)
-            # Relay SOURCES = telemetry producers only (the victim subnets). The attacker never ships to
-            # the defender's feed, and the defender box is the SINK (the relay forwards TO its ES over the
-            # mgmt-CIDR ingress it already has) — not a source — so both are excluded here.
-            relay_sources = [self._management.cidr] + [
+            mgmt_sg = self._new_security_group("management_sg", "Security group for management network")
+            self._allow(mgmt_sg, "egress", "0.0.0.0/0")
+            self._allow(mgmt_sg, "ingress", "0.0.0.0/0", "tcp", 22)
+            # Only victims produce defender telemetry; neither attacker nor defender is a source.
+            relay_sources = {management_source} | {
                 str(s.cidr) for s in topology.get_all_subnets()
-                if not s.external and s.name not in ("attacker_subnet", "defender_subnet")
-            ]
-            for prefix in relay_sources:
-                try:
-                    self._conn.network.create_security_group_rule(
-                        security_group_id=mgmt_sg.id, direction="ingress", protocol="tcp",
-                        port_range_min=9200, port_range_max=9200, remote_ip_prefix=prefix,
-                    )
-                except ConflictException:
-                    pass
-                time.sleep(1)
+                if not s.external and s.name not in {"attacker_subnet", "defender_subnet"}
+            }
+            for prefix in sorted(relay_sources):
+                self._allow(mgmt_sg, "ingress", prefix, "tcp", 9200)
             logger.info("Security group '%s' ready", self._n("management_sg"))
 
     def teardown(self, topology: NetworkTopology) -> None:
