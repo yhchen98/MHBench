@@ -40,7 +40,7 @@
   playbooks:
   - install_frr
   disk_size_gb: null
-  location: null
+  location: src/compilation/images/frr_router.qcow2
 - name: webserver
   parent: ubuntu_base
   playbooks:

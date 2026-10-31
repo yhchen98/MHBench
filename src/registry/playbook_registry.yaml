@@ -80,3 +80,4 @@ install_metasploit: src/playbooks/plays/install_metasploit.yml
 install_frr: src/playbooks/plays/install_frr.yml
 configure_routing: src/playbooks/plays/configure_routing.yml
 verify_bgp: src/playbooks/plays/verify_bgp.yml
+prepare_bgp_demo: src/playbooks/plays/prepare_bgp_demo.yml

@@ -81,7 +81,7 @@ The optional [routing section](docs/routing.md) describes BGP routers, peering l
 
 Without a routing section, hosts within a subnet can communicate freely. `external: true` permits ingress from any IPv4 source. Independently, `internet_egress: false` restricts new outbound connections to topology CIDRs and the management host, with DHCP preserved; public DNS servers are not exempt. Provider infrastructure differs: GCP always permits its metadata/DNS endpoint.
 
-The management host retains access to topology hosts for SSH and defender-requested forwarding. Its ingress permits public SSH, victim telemetry on TCP/9200, and explicitly requested forwarding ports from victim subnets. By default, victims can connect to `attacker_subnet` for callbacks, and `defender_subnet` can connect to victims; neither default connects attacker and defender. Explicit connections for either subnet pair replace that pair's role defaults in both directions. External ingress and management access remain separate exceptions.
+The management host retains access to topology hosts for SSH and defender-requested forwarding. Its ingress permits public SSH, victim telemetry on TCP/9200, and explicitly requested forwarding ports from victim subnets. By default, victims can connect to `attacker_subnet` for callbacks, and `defender_subnet` can connect to victims; neither default connects attacker and defender. Explicit connections for either subnet pair replace that pair's role defaults in both directions. External ingress and management access remain separate exceptions. Routed environments keep management and role defaults on the control networks.
 
 ## CLI
 
