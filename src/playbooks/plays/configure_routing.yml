@@ -100,7 +100,7 @@
     - name: Verify guest addresses, explicit routes, and the sole default gateway
       ansible.builtin.command:
         argv: [python3, /usr/local/sbin/mhbench-routing-guest, verify]
-        stdin: "{{ routing_prepared.stdout }}"
+        stdin: "{{ routing_prepared.stdout | from_json | to_json }}"
       changed_when: false
 
     - name: Write the declared integrated FRR configuration

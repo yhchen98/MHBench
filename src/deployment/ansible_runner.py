@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -117,32 +118,41 @@ class AnsibleRunner:
 
         try:
             for attempt in range(1, _PLAYBOOK_RETRIES + 1):
-                result = ansible_runner.run(
-                    private_data_dir=tmp,
-                    project_dir=project_dir,
-                    playbook=pb_path.name,
-                    inventory=inventory,
-                    extravars=extravars,
-                    event_handler=_stream,
-                    quiet=True,
-                    verbosity=self._verbosity,
-                    envvars={
-                        # One reused SSH connection per host across all tasks (ControlPersist) instead of a fresh
-                        # handshake per task — a 26-host configure otherwise opens thousands of connections through
-                        # the single bastion and overwhelms its sshd (the kex/timeout/connection-closed storms).
-                        "ANSIBLE_SSH_ARGS": (
-                            "-o ControlMaster=auto "
-                            f"-o ControlPath={ssh_ctl_dir}/%C "
-                            "-o ControlPersist=60s "
-                            "-o StrictHostKeyChecking=no "
-                            "-o UserKnownHostsFile=/dev/null "
-                            "-o ServerAliveInterval=30 "
-                            "-o ServerAliveCountMax=10"
-                        ),
-                        "ANSIBLE_PIPELINING": "True",
-                        "ANSIBLE_SSH_RETRIES": "3",
-                    }
-                )
+                # Ansible Runner installs process handlers on the main thread; do not leak them.
+                handlers = ({s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+                            if threading.current_thread() is threading.main_thread() else {})
+                try:
+                    result = ansible_runner.run(
+                        private_data_dir=tmp,
+                        project_dir=project_dir,
+                        playbook=pb_path.name,
+                        inventory=inventory,
+                        extravars=extravars,
+                        event_handler=_stream,
+                        quiet=True,
+                        verbosity=self._verbosity,
+                        envvars={
+                            # One reused SSH connection per host across all tasks (ControlPersist) instead of a fresh
+                            # handshake per task — a 26-host configure otherwise opens thousands of connections through
+                            # the single bastion and overwhelms its sshd (the kex/timeout/connection-closed storms).
+                            "ANSIBLE_SSH_ARGS": (
+                                "-o ControlMaster=auto "
+                                f"-o ControlPath={ssh_ctl_dir}/%C "
+                                "-o ControlPersist=60s "
+                                "-o StrictHostKeyChecking=no "
+                                "-o UserKnownHostsFile=/dev/null "
+                                "-o ServerAliveInterval=30 "
+                                "-o ServerAliveCountMax=10"
+                            ),
+                            "ANSIBLE_PIPELINING": "True",
+                            "ANSIBLE_SSH_RETRIES": "3",
+                        }
+                    )
+                finally:
+                    for signum, handler in handlers.items():
+                        signal.signal(signum, handler)
+                if result.status == "canceled":
+                    raise KeyboardInterrupt(f"Playbook '{pb_name}' canceled")
                 if result.status == "successful":
                     return
                 stderr = result.stderr.read() if result.stderr else ""

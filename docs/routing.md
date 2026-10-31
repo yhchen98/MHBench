@@ -75,58 +75,34 @@ Transit's filter bounds deaggregation at /24 but deliberately does not bind pref
 
 A /23 versus /24 models unauthorized deaggregation within a common maximum-/24 policy, without depending on /32 host-route acceptance. A same-prefix example with these symmetric customers would depend on further BGP tie-breaks. The private ASNs and [benchmarking addresses](https://www.iana.org/assignments/iana-ipv4-special-registry/) model an isolated lab, not Internet propagation or universal filtering practice. [RFC 7454](https://www.rfc-editor.org/rfc/rfc7454.html#section-6.1.3) discusses prefix-length filtering.
 
-### Preparation and baseline
+### Run and verify automatically
 
-Use the normal image/deployment workflow with `environments/non-generated/bgp_three_as.json` and a unique `--project-name`. The example needs six VMs including management, eight networks, and 14 VM NICs. Confirm site quota/flavors before cloud use. Validation alone uses `mhbench deploy environments/non-generated/bgp_three_as.json --validate-only`.
-
-Configuration runs `prepare_bgp_demo` after routing readiness. It starts HTTP services bound only to `198.19.0.10:8080`, returning `ORIGIN` on the server and `ATTACKER` on the attacker router. The latter has a guest-only loopback /24 backing route, prepared before measurement and initially unannounced; no overlapping Neutron port is created. The only declared application grant is client LAN → origin LAN TCP/8080, with stateful replies.
-
-Connect as root through the management bastion to the guests' control addresses. Run commands below on the named guest. Do not tunnel or proxy the probe through SSH. On the client, use a fresh numeric, source-bound request for every observation:
+Use the normal image workflow to build/upload the required images, and configure OpenStack and the SSH key as usual. From the MHBench directory:
 
 ```sh
-curl --noproxy '*' --interface 198.18.0.10 --connect-timeout 2 --max-time 5 http://198.19.0.10:8080/
+uv run python scripts/run_bgp_three_as.py --project-name bgp-demo
 ```
 
-On transit, record sessions, both prefixes, and the kernel forwarding decision:
+This creates and configures the fixed example, verifies it, and tears it down. It requires six VMs including management, eight networks, and 14 VM NICs. The project name must be unused. To verify an already configured deployment and then **delete it**:
 
 ```sh
-vtysh -c 'show bgp ipv4 unicast summary json'
-vtysh -c 'show bgp ipv4 unicast 198.19.0.0/23 json'
-vtysh -c 'show bgp ipv4 unicast 198.19.0.0/24 json'
-ip -4 route show
-ip -4 route get 198.19.0.10 from 198.18.0.10 iif <client-LAN-interface>
+uv run python scripts/run_bgp_three_as.py --project-name bgp-demo --existing
 ```
 
-Find actual interfaces by their assigned addresses with `ip -br -4 address`; do not assume NIC order. Baseline requires H absent, P via `10.250.0.1` with path `65001` and preference 200, and an ORIGIN response. Both origin and attacker must retain C through transit for replies. The client keeps default gateway `198.18.0.1`; its own route lookup cannot establish which BGP path transit selected.
+Use `--config` for another MHBench configuration or `--output-dir` for a new evidence directory. The default output is under `../.validation/bgp-three-as/`; reports and captures remain after teardown. The script supports this fixed OpenStack example and discovers interface names and the management floating IP from actual readback.
 
-### Announcement and withdrawal
+The runner checks services, BGP peers, addresses, return routes, host default gateways/rules, forwarding guards, NAT, and Neutron configuration. It captures transit's three data interfaces and control interface while issuing fresh numeric IPv4 HTTP requests bound to the client data address. Both response services and the attacker's loopback backing address are prepared before measurement.
 
-On attacker only, add the network statement without saving it to the startup configuration:
+| Stage | Transit next hop for the target | Response | WAN carrying requests and replies |
+| --- | --- | --- | --- |
+| Baseline | 10.250.0.1 | ORIGIN | Origin |
+| Announcement | 10.250.0.6 | ATTACKER | Attacker |
+| Withdrawal | 10.250.0.1 | ORIGIN | Origin |
 
-```sh
-vtysh -c 'configure terminal' -c 'router bgp 65003' -c 'address-family ipv4 unicast' -c 'network 198.19.0.0/24' -c 'end'
-```
+Before the announcement, a separate negative control administratively shuts down the origin BGP neighbor while retaining its configuration. Fresh client requests must fail with no P/H route, while control SSH and both local services remain healthy. A selected control default must hit the forwarding DROP rule. The neighbor and baseline are restored before measurement continues. Announcing and withdrawing H changes only the attacker's temporary BGP network statement; receiving policies, host routes, services, addresses, and firewalls remain fixed.
 
-Within a bounded convergence interval (for example 60 seconds), transit must keep P via origin and install H via `10.250.0.6`, path `65003`, preference 200. The same client request must now return ATTACKER. Change no services, addresses, gateways, firewalls, or receiving policies between these stages.
+Success requires the correct RIB/FIB changes, matching request/reply captures on the selected interfaces, no matching traffic on the unused WAN, and no TCP/8080 traffic on control. Capture failure or packet loss is a verification failure. Provider checks require no data gateway, DHCP, host routes, Neutron router attachments, or data floating IPs; addressless OVN metadata ports are recognized separately from router ports.
 
-Withdraw on attacker:
-
-```sh
-vtysh -c 'configure terminal' -c 'router bgp 65003' -c 'address-family ipv4 unicast' -c 'no network 198.19.0.0/24' -c 'end'
-```
-
-Require H absent from transit's BGP and kernel tables, the target lookup via `10.250.0.1`, and ORIGIN again. Keep the attacker backing address/service until after this observation; otherwise service failure could be mistaken for routing restoration. A convergence timeout is a failed run to diagnose.
-
-### Path evidence and negative controls
-
-Capture the probe tuple on transit's client LAN, selected WAN, unused WAN, and control NIC using `tcpdump -ni <interface> 'host 198.18.0.10 and host 198.19.0.10 and tcp port 8080'`, or use equivalent flow-specific counters. Requests and replies must use the origin WAN before/after the attack and attacker WAN during it, with no probe packets on the unused WAN or control NIC. On OpenStack, inspect actual data subnet gateway/DHCP settings, router interfaces, ports, and floating IPs as well; guest observations and generated requests alone cannot establish Neutron state.
-
-Before the measured attack, with H absent and both services healthy, disable the origin peering data interface using `ip link set <origin-WAN-interface> down` on origin. Wait for P and H to be absent on transit. A fresh client request must fail while control SSH and local service checks remain healthy. Inspect `iptables -nvxL MHBENCH_FORWARD` on transit for rejected control-default fallback. Restore the interface, use `vtysh -c 'clear bgp 10.250.0.2'` on origin if needed to prompt reconnection, and require the original route and ORIGIN response before the attack.
-
-For a separate filtering control, make a copy of the JSON whose `customer_in` rule omits `max_prefix_length`, retaining preference 200 on both links. Deploy this fixed exact-P policy from the start of a fresh fixture. P must work normally; the same H announcement must be exported by attacker but absent from transit's RIB/FIB, with ORIGIN still returned. Record attacker `show bgp ipv4 unicast neighbors 10.250.0.5 advertised-routes json` and an incoming BGP update capture on transit; received-route inspection is also available if inbound soft reconfiguration is enabled before the baseline. This control tests subprefix filtering, not origin authorization or an exact-prefix defense. Do not modify receiver policies during either fixture's attack.
-
-With a valid baseline route, separately check that a healthy listener on server TCP/8081 is unreachable from client and that a healthy client listener cannot receive a fresh server-initiated connection. Verify each listener locally first; a stopped service is not firewall-denial evidence. Keep these controls outside the announcement-only sequence.
-
-After withdrawal/restoration evidence, stop `mhbench-bgp-demo` on server and attacker. Stopping the attacker service removes its prepared loopback address. These demonstration services are not enabled at boot. Reconfiguration restores declared FRR state and prepares the services again; full teardown/provision/configure resets the experiment. Use the same project name for teardown.
+Errors, convergence deadlines, and interruption trigger restoration attempts, capture cleanup, and teardown of the owned/adopted deployment. Any verification or cleanup failure produces a nonzero exit and diagnostics in `summary.json`, `run.log`, command results, and capture files. A preflight namespace rejection leaves that deployment untouched. Check the reported remaining resources if cleanup fails.
 
 This is an MHBench operator demonstration. Existing Arena orchestration can pass the specification through the normal CLI, but its Kali-specific attacker discovery does not turn this FRR VM into an Incalmo foothold or grant BGP actions.
