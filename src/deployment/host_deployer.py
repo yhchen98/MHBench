@@ -198,7 +198,7 @@ class HostDeployer:
 
                 create_kwargs = dict(
                     name=self._n(host.name),    # OpenStack display label — experiment-prefixed, collision-safe
-                    hostname=host.name,         # in-VM hostname — clean DNS-safe host-N, decoupled from the prefix
+                    hostname=_dns_safe(host.hostname or host.name),  # in-VM/OS name; FRR/BGP expose it
                     imageRef=image.id,
                     flavorRef=flavor.id,
                     networks=[network_spec],
@@ -541,7 +541,7 @@ class HostDeployer:
             network_spec["fixed_ip"] = str(host.ip_address)
         logger.info("Submitting single host: %s  image=%s  flavor=%s", self._n(host.name), image.name, flavor.name)
         server = self._conn.compute.create_server(
-            name=self._n(host.name), hostname=_dns_safe(host.name), imageRef=image.id, flavorRef=flavor.id,
+            name=self._n(host.name), hostname=_dns_safe(host.hostname or host.name), imageRef=image.id, flavorRef=flavor.id,
             networks=[network_spec], security_groups=[{"name": self._n(subnet.sg_name)}],
             key_name=self._ssh_key_name, config_drive=True,
             # Tag dynamically-added hosts (decoys) so teardown can reap them: they are PREFIXED like

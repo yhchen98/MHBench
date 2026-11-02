@@ -55,6 +55,9 @@ class HostInterface(BaseModel):
 
 class Host(BaseModel):
     name: str
+    # In-VM/OS hostname. FRR and BGP derive their advertised name from it, so
+    # this is attacker-visible; `name` remains the resource/inventory identifier.
+    hostname: str | None = None
     vm_type: str
     flavor: str = "m1.small"
     ip_address: IPv4Address | None = None

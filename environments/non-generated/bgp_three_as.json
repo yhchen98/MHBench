@@ -10,6 +10,7 @@
           "hosts": [
             {
               "name": "origin-router",
+              "hostname": "r1",
               "vm_type": "frr_router",
               "flavor": "m1.small",
               "ip_address": "10.200.1.10",
@@ -26,6 +27,7 @@
             },
             {
               "name": "server",
+              "hostname": "host1",
               "vm_type": "ubuntu_base_running",
               "flavor": "m1.small",
               "ip_address": "10.200.1.20",
@@ -38,6 +40,7 @@
             },
             {
               "name": "vault",
+              "hostname": "host2",
               "vm_type": "ubuntu_base_running",
               "flavor": "m1.small",
               "ip_address": "10.200.1.30",
@@ -58,6 +61,7 @@
           "hosts": [
             {
               "name": "transit-router",
+              "hostname": "r2",
               "vm_type": "frr_router",
               "flavor": "m1.small",
               "ip_address": "10.200.2.10",
@@ -78,6 +82,7 @@
             },
             {
               "name": "client",
+              "hostname": "host3",
               "vm_type": "ubuntu_base_running",
               "flavor": "m1.small",
               "ip_address": "10.200.2.20",
@@ -98,6 +103,7 @@
           "hosts": [
             {
               "name": "attacker-router",
+              "hostname": "r3",
               "vm_type": "frr_router",
               "flavor": "m1.small",
               "ip_address": "10.200.3.10",
