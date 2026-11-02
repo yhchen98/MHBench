@@ -2,6 +2,7 @@
 """Prepare and verify the guest network managed by the routing playbook."""
 import ipaddress
 import json
+from pathlib import Path
 import socket
 import subprocess
 import sys
@@ -47,7 +48,37 @@ def prepare(payload):
                      for row in socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM)}
         if not addresses or any(not any(a in p for p in prefixes) for a in addresses):
             raise ValueError("C2 IPv4 addresses are not covered by control routes")
+    if "ID=kali" in open("/etc/os-release", encoding="utf-8").read():
+        network["network"]["renderer"] = "ifupdown"
     return network
+
+
+
+def apply_ifupdown(network):
+    names = devices(network)
+    ethernets = network["network"]["ethernets"]
+    control = ethernets["mhb_control"]
+    data_name = next(name for name in ethernets if name != "mhb_control")
+    data = ethernets[data_name]
+
+    lines = ["auto lo", "iface lo inet loopback", ""]
+    for entry, ifname in ((control, names["mhb_control"]), (data, names[data_name])):
+        lines += [f"auto {ifname}", f"iface {ifname} inet static"]
+        for address in entry["addresses"]:
+            lines.append(f"    address {address}")
+        default = next((route["via"] for route in entry.get("routes", [])
+                        if route["to"] in ("0.0.0.0/0", "default")), None)
+        if default:
+            lines.append(f"    gateway {default}")
+        for route in entry.get("routes", []):
+            if route["to"] in ("0.0.0.0/0", "default"):
+                continue
+            lines.append(f"    post-up ip route add {route['to']} via {route['via']} dev {ifname}")
+            lines.append(f"    pre-down ip route del {route['to']} via {route['via']} dev {ifname} || true")
+        lines.append("")
+    Path("/etc/network/interfaces").write_text("\n".join(lines), encoding="utf-8")
+    subprocess.run(["systemctl", "restart", "networking"], check=True)
+    return {"applied": True}
 
 
 def verify(network):
@@ -80,9 +111,11 @@ if __name__ == "__main__":
     payload = json.load(sys.stdin)
     if sys.argv[1] == "prepare":
         result = prepare(payload)
+    elif sys.argv[1] == "apply-ifupdown":
+        result = apply_ifupdown(payload)
     elif sys.argv[1] == "verify":
         result = verify(payload)
     else:
-        raise SystemExit("Expected prepare or verify")
+        raise SystemExit("Expected prepare, apply-ifupdown, or verify")
     json.dump(result, sys.stdout)
     print()

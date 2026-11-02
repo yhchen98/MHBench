@@ -230,10 +230,10 @@ class AnsibleRunner:
 
         queue: list[tuple[str | None, str, dict]] = []
         for host in hosts:
-            if self._attacker_only and host.vm_type != "kali_running":
+            if self._attacker_only and not self._is_kali(host.vm_type):
                 continue
             runtime_pbs = self._online.get_runtime_playbooks(host.vm_type)
-            if self._attacker_play and host.vm_type == "kali_running":
+            if self._attacker_play and self._is_kali(host.vm_type):
                 runtime_pbs = [self._attacker_play]
             if runtime_pbs:
                 queue.append((host.name, "check_if_host_up", {
@@ -321,9 +321,15 @@ class AnsibleRunner:
     # The environment ISSUES two scoped keys on top of the broad management key (which stays for
     # provisioning and never enters a spec): attacker_key opens the foothold only, defender_key opens the
     # defender box + victims. Injected here at configure so every deploy path gets them. Classified by
-    # subnet: attacker_subnet -> foothold, defender_subnet -> box, everything else internal -> victim.
+    # subnet: attacker_subnet -> foothold (prefer a Kali host over a router in the same subnet),
+    # defender_subnet -> box, everything else internal -> victim.
     _ATTACKER_SUBNET = "attacker_subnet"
     _DEFENDER_SUBNET = "defender_subnet"
+
+    @staticmethod
+    def _is_kali(vm_type: str) -> bool:
+        """True for any Kali attacker image profile (the shared one or a dedicated one)."""
+        return vm_type.startswith("kali")
 
     def _issue_scoped_keys(self):
         keydir = _MHBENCH_DIR / "keys"
@@ -375,7 +381,7 @@ class AnsibleRunner:
         except Exception as e:  # noqa: BLE001 — best-effort; never fail configure
             logger.warning("Scoped-key generation failed (%s); skipping injection.", e)
             return
-        foothold_ip = None
+        attacker_hosts: list[tuple[bool, str]] = []
         box_ip = None
         victim_ips: list[str] = []
         for sub in topology.get_all_subnets():
@@ -383,12 +389,15 @@ class AnsibleRunner:
                 if not h.ip_address:
                     continue
                 ip = str(h.ip_address)
-                if sub.name == self._ATTACKER_SUBNET or h.vm_type == "kali_running":
-                    foothold_ip = ip
+                if sub.name == self._ATTACKER_SUBNET or self._is_kali(h.vm_type):
+                    attacker_hosts.append((self._is_kali(h.vm_type), ip))
                 elif sub.name == self._DEFENDER_SUBNET:
                     box_ip = ip
                 else:
                     victim_ips.append(ip)
+        foothold_ip = next((ip for is_kali, ip in attacker_hosts if is_kali), None)
+        if foothold_ip is None and attacker_hosts:
+            foothold_ip = attacker_hosts[0][1]
         try:
             if foothold_ip:
                 ok = self._inject_pubkey(ak_pub, foothold_ip, mgmt_floating_ip)
@@ -448,10 +457,10 @@ class AnsibleRunner:
         # sequential; only across hosts is it parallel). Topology plays are cross-host and run after, serially.
         per_host: dict[str, list[tuple[str, dict]]] = {}
         for host in hosts:
-            if self._attacker_only and host.vm_type != "kali_running":
+            if self._attacker_only and not self._is_kali(host.vm_type):
                 continue
             runtime_pbs = self._online.get_runtime_playbooks(host.vm_type)
-            if self._attacker_play and host.vm_type == "kali_running":
+            if self._attacker_play and self._is_kali(host.vm_type):
                 runtime_pbs = [self._attacker_play]
             if runtime_pbs:
                 per_host[host.name] = (

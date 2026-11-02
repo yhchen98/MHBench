@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision, verify, and tear down MHBench's fixed three-AS OpenStack example."""
+"""Provision, verify, and tear down MHBench's fixed three-AS BGP attack scenario."""
 from __future__ import annotations
 
 import argparse
@@ -34,16 +34,39 @@ TARGET, SOURCE = "198.19.0.10", "198.18.0.10"
 HOSTS = {
     "origin-router": ["10.200.1.10/24", "10.250.0.1/30", "198.19.0.1/23"],
     "transit-router": ["10.200.2.10/24", "10.250.0.2/30", "10.250.0.5/30", "198.18.0.1/24"],
-    "attacker-router": ["10.200.3.10/24", "10.250.0.6/30"],
+    "attacker-router": ["10.200.3.10/24", "10.250.0.6/30", "10.250.0.9/30"],
     "client": ["10.200.2.20/24", "198.18.0.10/24"],
     "server": ["10.200.1.20/24", "198.19.0.10/23"],
+    "vault": ["10.200.1.30/24", "198.19.1.20/23"],
+    "kali": ["10.200.3.20/24", "10.250.0.10/30"],
 }
 ASNS = {"origin-router": 65001, "transit-router": 65002, "attacker-router": 65003}
 PEERS = {"origin-router": ["10.250.0.2"], "transit-router": ["10.250.0.1", "10.250.0.6"],
          "attacker-router": ["10.250.0.5"]}
 DATA = {"origin_transit": "10.250.0.0/30", "transit_attacker": "10.250.0.4/30",
-        "origin_lan": P, "client_lan": C}
+        "attacker_lan": "10.250.0.8/30", "origin_lan": P, "client_lan": C}
+GATEWAYS = {"server": "198.19.0.1", "vault": "198.19.0.1", "client": "198.18.0.1",
+            "kali": "10.250.0.9"}
+SERVICES = {"server": ("mhbench-portal", "ORIGIN"),
+            "vault": ("mhbench-vault", "VAULT"),
+            "client": ("mhbench-client", None)}
 LOG = logging.getLogger("bgp-three-as")
+
+# The temporary attacker-side responder: the runner's equivalent of the Kali
+# login-impersonation service, bound to the hijacked address.
+PROBE = """
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b'ATTACKER\\n'
+        self.send_response(200)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, fmt, *args):
+        pass
+HTTPServer(('198.19.0.10', 8080), Handler).serve_forever()
+"""
 
 # EOF (including a controller disconnect) or the deadline stops this exact child.
 CAPTURE = """
@@ -114,13 +137,18 @@ def host_routes(routes, rules, control, data, gateway):
                     f"Control route covers experimental data: {route}")
 
 
-def check_guard(forward, chain, nat, control):
+def check_guard(forward, chain, nat, control, responses=()):
     require(forward.splitlines() == ["-P FORWARD ACCEPT", "-A FORWARD -j MHBENCH_FORWARD"],
             "Unexpected forwarding rules or guard ordering")
-    require(chain.splitlines() == [
-        "-N MHBENCH_FORWARD", f"-A MHBENCH_FORWARD -i {control} -j DROP",
-        f"-A MHBENCH_FORWARD -o {control} -j DROP", "-A MHBENCH_FORWARD -j RETURN"],
-        "Control/data forwarding guard differs from the fixed experiment")
+    expected = ["-N MHBENCH_FORWARD", f"-A MHBENCH_FORWARD -i {control} -j DROP",
+                f"-A MHBENCH_FORWARD -o {control} -j DROP"]
+    for interface, prefix in responses:
+        expected += [
+            f"-A MHBENCH_FORWARD -s {prefix} -i {interface} -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN",
+            f"-A MHBENCH_FORWARD -s {prefix} -i {interface} -j DROP",
+        ]
+    require(chain.splitlines() == expected + ["-A MHBENCH_FORWARD -j RETURN"],
+            "Control/data/response forwarding guard differs from the fixed experiment")
     require(nat.splitlines() == [f"-P {c} ACCEPT" for c in
                                 ["PREROUTING", "INPUT", "OUTPUT", "POSTROUTING"]],
             "Unexpected NAT rules")
@@ -208,13 +236,15 @@ class Experiment:
         self.fip_ids = set()
         self.initial_fip_ids = None
         self.shutdown = self.announced = self.owned = False
+        self.probe_pid = None
+        self.probe_started = self.routed = False
         self.report = {"observations": {}, "cleanup_errors": []}
         self.commands = (output / "commands.jsonl").open("w")
         self.server_names = {self.n(name) for name in [*HOSTS, "management_host"]}
         self.network_names = {self.n(s.name) for s in topology.get_all_subnets()} | {self.n("management_network")}
         self.subnet_names = {self.n(s.name + "-subnet") for s in topology.get_all_subnets()} | {self.n("management_subnet")}
         self.sg_names = {self.n(s + "_sg") for s in ["origin_control", "transit_control",
-                         "attacker_subnet", "origin_lan", "client_lan"]} | {self.n("management_sg")}
+                         "attacker_subnet", "origin_lan", "client_lan", "attacker_lan"]} | {self.n("management_sg")}
 
     def n(self, name):
         return self.project + "-" + name
@@ -274,7 +304,7 @@ class Experiment:
     def provider(self):
         resources = self.resources()
         require({s.name for s in resources["servers"]} == self.server_names
-                and all(s.status == "ACTIVE" for s in resources["servers"]), "Expected six ACTIVE VMs")
+                and all(s.status == "ACTIVE" for s in resources["servers"]), "Expected eight ACTIVE VMs")
         require({n.name for n in resources["networks"]} == self.network_names
                 and {s.name for s in resources["subnets"]} == self.subnet_names,
                 "Provider networks/subnets do not match the example")
@@ -344,19 +374,19 @@ class Experiment:
     def vty(self, host, *commands):
         return self.run(host, ["vtysh", *[x for c in commands for x in ["-c", c]]])
 
-    def service(self, host, expected):
-        rows = self.batch(host, {"active": ["systemctl", "is-active", "mhbench-bgp-demo"],
-                                "pid": ["systemctl", "show", "mhbench-bgp-demo", "--property=MainPID", "--value"],
-                                "listener": ["ss", "-H", "-lntp", "( sport = :8080 )"],
-                                "response": ["curl", "-4", "--noproxy", "*", "--max-time", "5", "--silent",
-                                             "--show-error", f"http://{TARGET}:8080/"]})
+    def service(self, host, name, expected=None):
+        commands = {"active": ["systemctl", "is-active", name],
+                    "pid": ["systemctl", "show", name, "--property=MainPID", "--value"]}
+        if expected is not None:
+            commands["response"] = ["curl", "-4", "--noproxy", "*", "--max-time", "5",
+                                    "--silent", "--show-error", "http://127.0.0.1:8080/health"]
+        rows = self.batch(host, commands)
         require(all(r["rc"] == 0 for r in rows.values()), f"{host}: local service check failed")
         require(rows["active"]["stdout"].strip() == "active"
-                and rows["response"]["stdout"].strip() == expected
-                and int(rows["pid"]["stdout"]) > 0, f"{host}: wrong service state/response")
-        listeners = rows["listener"]["stdout"].splitlines()
-        require(len(listeners) == 1 and listeners[0].split()[3] == TARGET + ":8080",
-                f"{host}: service must bind only the data address")
+                and int(rows["pid"]["stdout"]) > 0, f"{host}: wrong service state")
+        if expected is not None:
+            require(rows["response"]["stdout"].strip() == expected,
+                    f"{host}: wrong service response")
         return int(rows["pid"]["stdout"])
 
     def guests(self):
@@ -376,8 +406,10 @@ class Experiment:
             require(all(r["rc"] == 0 for r in rows.values()), f"{host}: guest readback failed")
             addresses = json.loads(rows["addresses"]["stdout"])
             self.devices[host] = address_devices(addresses, expected)
-            all_addresses = sorted(f"{a['local']}/{a['prefixlen']}" for r in addresses for a in r.get("addr_info", []))
-            wanted = expected + ["127.0.0.1/8"] + ([TARGET + "/24"] if host == "attacker-router" else [])
+            all_addresses = sorted(f"{a['local']}/{a['prefixlen']}" for r in addresses
+                                   if r.get("ifname") != "docker0" for a in r.get("addr_info", []))
+            wanted = expected + ["127.0.0.1/8"] + (
+                [TARGET + "/24"] if host == "kali" and self.probe_started else [])
             require(all_addresses == sorted(wanted), f"{host}: unexpected or missing IPv4 addresses")
             control = self.devices[host][expected[0]]
             require(rows["forwarding"]["stdout"].strip() == ("1" if host in ASNS else "0"),
@@ -389,14 +421,16 @@ class Experiment:
                 require(peers["as"] == ASNS[host] and set(peers["peers"]) == set(PEERS[host])
                         and all(p["state"] == "Established" for p in peers["peers"].values()),
                         f"{host}: expected Established peers")
+                responses = [(self.devices[host]["10.250.0.9/30"], P)] if host == "attacker-router" else []
                 check_guard(rows["forward"]["stdout"].strip(), rows["guard"]["stdout"].strip(),
-                            rows["nat"]["stdout"].strip(), control)
+                            rows["nat"]["stdout"].strip(), control, responses)
                 stable["firewall"] = [rows[k]["stdout"] for k in ["forward", "guard", "nat"]]
             else:
                 routes, rules = json.loads(rows["routes"]["stdout"]), json.loads(rows["rules"]["stdout"])
-                gateway = "198.18.0.1" if host == "client" else "198.19.0.1"
+                gateway = GATEWAYS[host]
                 host_routes(routes, rules, control, self.devices[host][expected[1]], gateway)
-                destination, source = (TARGET, SOURCE) if host == "client" else (SOURCE, TARGET)
+                data_ip = expected[1].split("/")[0]
+                destination, source = (TARGET, SOURCE) if host == "client" else (SOURCE, data_ip)
                 lookup = json.loads(self.run(host, ["ip", "-j", "-4", "route", "get", destination, "from", source]))
                 require(len(lookup) == 1 and lookup[0].get("gateway") == gateway
                         and lookup[0].get("dev") == self.devices[host][expected[1]],
@@ -406,17 +440,25 @@ class Experiment:
                 # Compare in memory, without logging arbitrary router configuration/passwords.
                 stable["receiver_config"] = self.run(
                     host, ["vtysh", "-c", "show running-config"], record=False)
-            if host in ["server", "attacker-router"]:
-                stable["service_pid"] = self.service(host, "ORIGIN" if host == "server" else "ATTACKER")
+            if host in SERVICES:
+                name, expected_response = SERVICES[host]
+                stable["service_pid"] = self.service(host, name, expected_response)
             snapshot[host] = stable
         return snapshot
 
     def returns(self):
-        for host, via in [("origin-router", "10.250.0.2"), ("attacker-router", "10.250.0.5")]:
-            data = json.loads(self.vty(host, "show bgp ipv4 unicast " + C + " json"))
-            route = json.loads(self.run(host, ["ip", "-j", "-4", "route", "show", "exact", C]))
-            require(bgp_path(data, C, via, 65002, 100) and len(route) == 1
-                    and route[0].get("gateway") == via, f"{host}: missing data return route")
+        kali_lan = DATA["attacker_lan"]
+        checks = [
+            ("origin-router", C, "10.250.0.2", 65002, 100),
+            ("attacker-router", C, "10.250.0.5", 65002, 100),
+            ("transit-router", kali_lan, "10.250.0.6", 65003, 200),
+            ("origin-router", kali_lan, "10.250.0.2", "65002 65003", 100),
+        ]
+        for host, prefix, via, path, preference in checks:
+            data = json.loads(self.vty(host, "show bgp ipv4 unicast " + prefix + " json"))
+            route = json.loads(self.run(host, ["ip", "-j", "-4", "route", "show", "exact", prefix]))
+            require(bgp_path(data, prefix, via, path, preference) and len(route) == 1
+                    and route[0].get("gateway") == via, f"{host}: missing data return route for {prefix}")
 
     def transit(self, timeout=20):
         interface = self.devices["transit-router"]["198.18.0.1/24"]
@@ -485,7 +527,7 @@ class Experiment:
         row = self.batch("client", {"probe": ["curl", "-4", "--noproxy", "*", "--interface", SOURCE,
                     "--connect-timeout", "2", "--max-time", "5", "--silent", "--show-error",
                     "--write-out", "\nMHB_SOCKET %{local_ip} %{local_port} %{remote_ip} %{remote_port}\n",
-                    f"http://{TARGET}:8080/"]})["probe"]
+                    f"http://{TARGET}:8080/health"]})["probe"]
         self.report.setdefault("probes", {})[stage] = row
         if expected is None:
             require(row["rc"] in [7, 28], f"{stage}: expected connection failure, got {row}")
@@ -507,10 +549,67 @@ class Experiment:
         self.vty("attacker-router", "configure terminal", "router bgp 65003", "address-family ipv4 unicast",
                  ("" if enabled else "no ") + "network " + H, "end")
 
+    def start_probe(self):
+        """Install the runner's temporary attacker-side responder and its delivery route."""
+        self.run("kali", ["ip", "addr", "replace", TARGET + "/24", "dev", "lo"])
+        command = "nohup python3 -c " + shlex.quote(PROBE) + \
+                  " >/tmp/mhbench-attacker-probe.log 2>&1 & echo $!"
+        self.probe_pid = int(self.run("kali", ["sh", "-c", command]).strip().splitlines()[-1])
+        self.probe_started = True
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            row = self.batch("kali", {"ready": ["curl", "-4", "--noproxy", "*", "--max-time", "2",
+                                               "--silent", "--show-error", f"http://{TARGET}:8080/health"]},
+                             record=False)["ready"]
+            if row["rc"] == 0 and row["stdout"].strip() == "ATTACKER":
+                break
+            time.sleep(0.5)
+        else:
+            raise RuntimeError("Attacker responder did not become ready")
+        self.vty("attacker-router", "configure terminal", "ip route " + H + " 10.250.0.10", "end")
+        self.routed = True
+        self.save()
+
+    def stop_probe(self):
+        """Remove the temporary responder and delivery route; idempotent."""
+        errors = []
+        if self.probe_pid:
+            try:
+                self.run("kali", ["sh", "-c", f"kill {self.probe_pid} 2>/dev/null || true"])
+            except Exception as exc:
+                errors.append(f"stop Kali responder: {exc}")
+            self.probe_pid = None
+        if self.routed:
+            try:
+                self.vty("attacker-router", "configure terminal", "no ip route " + H + " 10.250.0.10", "end")
+            except Exception as exc:
+                errors.append(f"remove H route: {exc}")
+            self.routed = False
+        try:
+            self.run("kali", ["sh", "-c", f"ip addr del {TARGET}/24 dev lo 2>/dev/null || true"])
+        except Exception as exc:
+            errors.append(f"remove Kali {TARGET}: {exc}")
+        self.probe_started = False
+        self.save()
+        require(not errors, "; ".join(errors))
+
+    def verify_baseline(self):
+        """Non-mutating checks against an existing deployment; never changes BGP or ownership."""
+        LOG.info("Verifying the existing deployment's baseline state")
+        self.provider()
+        self.guests()
+        self.returns()
+        self.wait_routes("initial")
+        self.probe("verify-only", "ORIGIN", "origin")
+        self.report["verify_only"] = True
+        self.save()
+        LOG.info("Baseline verification passed without mutation")
+
     def verify(self):
         LOG.info("Checking provider and guest readiness")
         self.provider()
         self.run("transit-router", ["tcpdump", "--version"])
+        self.start_probe()
         baseline = self.guests()
         self.returns()
         self.wait_routes("initial")
@@ -530,8 +629,8 @@ class Experiment:
                 require(counter() > before, "Control-facing DROP counter did not increase")
             for host in HOSTS:
                 self.run(host, ["true"])
-            self.service("server", "ORIGIN")
-            self.service("attacker-router", "ATTACKER")
+            self.service("server", "mhbench-portal", "ORIGIN")
+            self.service("vault", "mhbench-vault", "VAULT")
         finally:
             self.neighbor(False)
             self.shutdown = False
@@ -553,6 +652,7 @@ class Experiment:
         self.probe("withdrawn", "ORIGIN", "origin")
         require(self.guests() == baseline, "State changed after withdrawal")
         self.returns()
+        self.stop_probe()
         self.stop_captures()
         self.report["packet_paths"] = capture_evidence(
             {role: self.output / (role + ".tcpdump") for role in ["client", "origin", "attacker", "control"]}, self.probes)
@@ -564,6 +664,7 @@ class Experiment:
         errors = self.report["cleanup_errors"]
         for needed, action, label in [(self.announced, lambda: self.announcement(False), "withdraw H"),
                                       (self.shutdown, lambda: self.neighbor(False), "restore origin peer"),
+                                      (self.probe_started or self.routed, self.stop_probe, "stop attacker responder"),
                                       (bool(self.captures), self.stop_captures, "stop captures")]:
             if needed:
                 try:
@@ -606,9 +707,15 @@ def load_topology(config):
               [f"{i.ip_address}/{topology.get_subnet_by_name(i.subnet).cidr.prefixlen}" for i in h.extra_interfaces]
               for h in topology.get_all_hosts()}
     require(actual == HOSTS, "Example guest/address contract changed; update the fixed verifier deliberately")
+    require(topology.get_host_by_name("kali").extra_interfaces[0].response_prefixes == [ipaddress.IPv4Network(P)],
+            "Kali reply-source permission must match the origin aggregate")
     require({r.host: r.asn for r in topology.routing.routers} == ASNS, "Example ASNs changed")
     require({s.name: str(s.cidr) for s in topology.get_all_subnets() if s.name in topology.routing.data_subnet_names(topology)} == DATA,
             "Example data subnets changed")
+    out_policy = next((p for p in topology.routing.policies if p.name == "attacker_out"), None)
+    require(out_policy is not None and any(
+                str(rule.prefix) == P and rule.max_prefix_length == 24 for rule in out_policy.rules),
+            "Attacker export policy must be the generic P/max-24 form")
     for router in topology.routing.routers:
         require(sorted(p["address"] for p in router_peers(topology, router)) == sorted(PEERS[router.host]),
                 "Example peers changed")
@@ -620,9 +727,14 @@ def main(argv=None):
     parser.add_argument("--config", type=Path, default=REPO / "config/config.yaml")
     parser.add_argument("--project-name", default="bgp-demo")
     parser.add_argument("--existing", action="store_true", help="Adopt an existing deployment; DELETE it after verification")
+    parser.add_argument("--verify-only", action="store_true",
+                        help="Adopt an existing deployment, run only non-mutating baseline checks, and never tear it down")
     parser.add_argument("--output-dir", type=Path, help="New directory for retained evidence (must not exist)")
     args = parser.parse_args(argv)
     require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,60}", args.project_name), "Invalid project name")
+    if args.verify_only and args.existing:
+        raise SystemExit("--verify-only and --existing are mutually exclusive")
+    adopt = args.existing or args.verify_only
     config_path = args.config.resolve()
     output = (args.output_dir or REPO.parent / ".validation/bgp-three-as" /
               (args.project_name + "-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ"))).resolve()
@@ -630,7 +742,7 @@ def main(argv=None):
     config = Config.load(config_path)
     topology = load_topology(config)
     require(shutil.which("ssh") is not None, "SSH client is required")
-    if not args.existing:
+    if not adopt:
         require(shutil.which("ansible-playbook") is not None, "ansible-playbook is required; use uv run python")
     require(Path(config.ssh_key_path).expanduser().is_file(), "Configured SSH private key file is missing")
     output.mkdir(parents=True, mode=0o700)
@@ -638,7 +750,8 @@ def main(argv=None):
                         handlers=[logging.StreamHandler(), logging.FileHandler(output / "run.log")])
     revision = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True)
     experiment = Experiment(config, topology, args.project_name, output)
-    experiment.report.update(revision=revision.stdout.strip(), project=args.project_name, existing=args.existing)
+    experiment.report.update(revision=revision.stdout.strip(), project=args.project_name,
+                             existing=args.existing, verify_only=args.verify_only)
     def interrupted(signum, frame):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -647,12 +760,16 @@ def main(argv=None):
     old_int = signal.signal(signal.SIGINT, interrupted)
     succeeded = False
     try:
-        experiment.namespace(args.existing)
-        if not args.existing:
-            LOG.info("Provisioning and configuring project %s", args.project_name)
-            experiment.mgmt = experiment.orchestrator.provision(topology)
-            experiment.orchestrator.configure(topology, experiment.mgmt)
-        experiment.verify()
+        experiment.namespace(adopt)
+        if args.verify_only:
+            experiment.owned = False
+            experiment.verify_baseline()
+        else:
+            if not args.existing:
+                LOG.info("Provisioning and configuring project %s", args.project_name)
+                experiment.mgmt = experiment.orchestrator.provision(topology)
+                experiment.orchestrator.configure(topology, experiment.mgmt)
+            experiment.verify()
         succeeded = True
     except (Exception, KeyboardInterrupt) as exc:
         experiment.report["error"] = f"{type(exc).__name__}: {exc}"

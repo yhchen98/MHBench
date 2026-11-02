@@ -116,9 +116,18 @@ def guest_configurations(topology: NetworkTopology, config: Config,
                 entry["routes"] = [{"to": "0.0.0.0/0", "via": str(gateways[name].gateway)}]
             ethernets[f"mhb_data_{index}"] = entry
         router = routers.get(name)
+        response_sources = []
+        if router:
+            for endpoint in routing.host_gateways:
+                if any(i.subnet == endpoint.subnet and i.ip_address == endpoint.gateway
+                       for i in host.extra_interfaces):
+                    interface = topology.get_host_by_name(endpoint.host).extra_interfaces[0]
+                    response_sources.extend({"mac": actual["macs"][endpoint.subnet].lower(),
+                                             "prefix": str(p)} for p in interface.response_prefixes)
         result[name] = {
             "routing_router": is_router,
             "routing_control_mac": actual["macs"][primary.name].lower(),
+            "routing_response_sources": response_sources,
             "routing_netplan": yaml.safe_dump({"network": {"version": 2, "renderer": "networkd",
                                                          "ethernets": ethernets}}, sort_keys=False),
             "routing_frr": render_frr(topology, router) if router else "",

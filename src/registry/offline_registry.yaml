@@ -22,6 +22,12 @@
   - kali_packages
   disk_size_gb: null
   location: src/compilation/images/kali_base.qcow2
+- name: kali_docker
+  parent: kali_base
+  playbooks:
+  - install_kali_attacker
+  disk_size_gb: null
+  location: src/compilation/images/kali_docker.qcow2
 - name: ubuntu_root_ssh
   parent: ubuntu20
   playbooks:
