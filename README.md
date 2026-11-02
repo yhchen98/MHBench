@@ -85,7 +85,7 @@ The management host retains access to topology hosts for SSH and defender-reques
 
 ## CLI
 
-All commands accept `--config PATH` (default `config/config.yaml`) and `-v/--verbose`. Run `mhbench --help` or `mhbench <command> --help` to see every option.
+Place global options before the command: `mhbench --config PATH -v deploy SPEC`. The default configuration is `config/config.yaml`. Run `mhbench --help` or `mhbench <command> --help` to see every option.
 
 ### Compile images
 
@@ -95,6 +95,15 @@ Builds offline-registry images in dependency order.
 mhbench compile ubuntu_base webserver          # specific images (with ancestors)
 mhbench compile --all                          # everything in the registry
 mhbench compile --all --force                  # force rebuild
+```
+
+### Upload images
+
+Upload the compiled images to the configured cloud before deploying hosts that use them. Image names come from the offline registry.
+
+```bash
+mhbench upload ubuntu_base webserver
+mhbench upload --all
 ```
 
 ### Deploy a topology (provision + configure)
@@ -146,8 +155,9 @@ The `--project-name` must match the value used at deploy time, or resources will
 ## Typical workflow
 
 ```bash
-# 1. Build images once
+# 1. Build and upload images once
 mhbench compile --all
+mhbench upload --all
 
 # 2. Deploy an environment
 mhbench deploy environments/non-generated/chain.json --project-name exp1
@@ -210,7 +220,7 @@ Ubuntu-only smoke topology
 ```bash
 uv sync --extra gcp
 mhbench compile ubuntu_base && mhbench upload ubuntu_base
-mhbench deploy environments/non-generated/gcp_smoke.json --project-name gcpsmoke -v
+mhbench -v deploy environments/non-generated/gcp_smoke.json --project-name gcpsmoke
 mhbench teardown environments/non-generated/gcp_smoke.json --project-name gcpsmoke --yes
 ```
 

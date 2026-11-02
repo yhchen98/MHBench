@@ -11,6 +11,7 @@
             {
               "name": "origin-router",
               "vm_type": "frr_router",
+              "flavor": "m1.small",
               "ip_address": "10.200.1.10",
               "extra_interfaces": [
                 {
@@ -26,11 +27,24 @@
             {
               "name": "server",
               "vm_type": "ubuntu_base_running",
+              "flavor": "m1.small",
               "ip_address": "10.200.1.20",
               "extra_interfaces": [
                 {
                   "subnet": "origin_lan",
                   "ip_address": "198.19.0.10"
+                }
+              ]
+            },
+            {
+              "name": "vault",
+              "vm_type": "ubuntu_base_running",
+              "flavor": "m1.small",
+              "ip_address": "10.200.1.30",
+              "extra_interfaces": [
+                {
+                  "subnet": "origin_lan",
+                  "ip_address": "198.19.1.20"
                 }
               ]
             }
@@ -45,6 +59,7 @@
             {
               "name": "transit-router",
               "vm_type": "frr_router",
+              "flavor": "m1.small",
               "ip_address": "10.200.2.10",
               "extra_interfaces": [
                 {
@@ -64,6 +79,7 @@
             {
               "name": "client",
               "vm_type": "ubuntu_base_running",
+              "flavor": "m1.small",
               "ip_address": "10.200.2.20",
               "extra_interfaces": [
                 {
@@ -83,11 +99,31 @@
             {
               "name": "attacker-router",
               "vm_type": "frr_router",
+              "flavor": "m1.small",
               "ip_address": "10.200.3.10",
               "extra_interfaces": [
                 {
                   "subnet": "transit_attacker",
                   "ip_address": "10.250.0.6"
+                },
+                {
+                  "subnet": "attacker_lan",
+                  "ip_address": "10.250.0.9"
+                }
+              ]
+            },
+            {
+              "name": "kali",
+              "vm_type": "kali_attacker_running",
+              "flavor": "m2.large",
+              "ip_address": "10.200.3.20",
+              "extra_interfaces": [
+                {
+                  "subnet": "attacker_lan",
+                  "ip_address": "10.250.0.10",
+                  "response_prefixes": [
+                    "198.19.0.0/23"
+                  ]
                 }
               ]
             }
@@ -111,6 +147,14 @@
         {
           "name": "transit_attacker",
           "cidr": "10.250.0.4/30",
+          "dns_servers": [],
+          "hosts": [],
+          "external": false,
+          "internet_egress": false
+        },
+        {
+          "name": "attacker_lan",
+          "cidr": "10.250.0.8/30",
           "dns_servers": [],
           "hosts": [],
           "external": false,
@@ -144,6 +188,24 @@
         8080
       ],
       "bidirectional": false
+    },
+    {
+      "from_subnet": "attacker_lan",
+      "to_subnet": "origin_lan",
+      "protocol": "tcp",
+      "ports": [
+        8080
+      ],
+      "bidirectional": false
+    },
+    {
+      "from_subnet": "client_lan",
+      "to_subnet": "attacker_lan",
+      "protocol": "tcp",
+      "ports": [
+        8080
+      ],
+      "bidirectional": false
     }
   ],
   "routing": {
@@ -168,7 +230,9 @@
         "host": "attacker-router",
         "asn": 65003,
         "router_id": "3.3.3.3",
-        "advertised_prefixes": []
+        "advertised_prefixes": [
+          "10.250.0.8/30"
+        ]
       }
     ],
     "peerings": [
@@ -212,6 +276,11 @@
             "action": "permit",
             "max_prefix_length": 24,
             "local_preference": 200
+          },
+          {
+            "prefix": "10.250.0.8/30",
+            "action": "permit",
+            "local_preference": 200
           }
         ],
         "default_action": "deny"
@@ -227,6 +296,10 @@
             "prefix": "198.19.0.0/23",
             "action": "permit",
             "max_prefix_length": 24
+          },
+          {
+            "prefix": "10.250.0.8/30",
+            "action": "permit"
           }
         ],
         "default_action": "deny"
@@ -236,6 +309,11 @@
         "rules": [
           {
             "prefix": "198.18.0.0/24",
+            "action": "permit",
+            "local_preference": 100
+          },
+          {
+            "prefix": "10.250.0.8/30",
             "action": "permit",
             "local_preference": 100
           }
@@ -272,7 +350,12 @@
         "name": "attacker_out",
         "rules": [
           {
-            "prefix": "198.19.0.0/24",
+            "prefix": "198.19.0.0/23",
+            "action": "permit",
+            "max_prefix_length": 24
+          },
+          {
+            "prefix": "10.250.0.8/30",
             "action": "permit"
           }
         ],
@@ -286,15 +369,25 @@
         "gateway": "198.19.0.1"
       },
       {
+        "host": "vault",
+        "subnet": "origin_lan",
+        "gateway": "198.19.0.1"
+      },
+      {
         "host": "client",
         "subnet": "client_lan",
         "gateway": "198.18.0.1"
+      },
+      {
+        "host": "kali",
+        "subnet": "attacker_lan",
+        "gateway": "10.250.0.9"
       }
     ]
   },
   "playbooks": [
     {
-      "name": "prepare_bgp_demo",
+      "name": "prepare_bgp_scenario",
       "args": {}
     }
   ]
