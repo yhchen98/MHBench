@@ -31,9 +31,7 @@ fi
 for path in /proc/sys/net/ipv4/conf/*; do
     printf '0\n' > "$path/accept_redirects"
     printf '0\n' > "$path/send_redirects"
-{% if routing_router %}
     printf '0\n' > "$path/rp_filter"
-{% endif %}
 done
 {% if routing_router %}
 if iptables -w 5 -nL MHBENCH_INPUT >/dev/null 2>&1; then

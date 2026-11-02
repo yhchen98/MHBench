@@ -26,6 +26,10 @@
       register: routing_prepared
       changed_when: false
 
+    - name: Identify the guest network backend
+      ansible.builtin.set_fact:
+        routing_renderer: "{{ (routing_prepared.stdout | from_json)['network'].get('renderer', 'netplan') }}"
+
     - name: Keep cloud-init from replacing the declared guest network
       ansible.builtin.copy:
         dest: /etc/cloud/cloud.cfg.d/99-mhbench-network.cfg
@@ -33,6 +37,7 @@
         mode: '0644'
 
     - name: Write the complete MAC-matched network configuration
+      when: routing_renderer != 'ifupdown'
       ansible.builtin.copy:
         dest: /etc/netplan/50-cloud-init.yaml
         content: "{{ routing_prepared.stdout | from_json | to_nice_yaml }}"
@@ -74,14 +79,23 @@
         state: restarted
 
     - name: Check Netplan syntax
+      when: routing_renderer != 'ifupdown'
       ansible.builtin.command: netplan generate
       changed_when: false
 
     - name: Apply the network without depending on the current SSH channel
+      when: routing_renderer != 'ifupdown'
       ansible.builtin.command: netplan apply
       async: 60
       poll: 0
       register: routing_apply
+
+    - name: Configure the Kali guest network
+      ansible.builtin.command:
+        argv: [python3, /usr/local/sbin/mhbench-routing-guest, apply-ifupdown]
+        stdin: "{{ routing_prepared.stdout | from_json | to_json }}"
+      changed_when: true
+      when: routing_renderer == 'ifupdown'
 
     - name: Reconnect through the unchanged primary control address
       ansible.builtin.wait_for_connection:
@@ -90,6 +104,7 @@
         timeout: 120
 
     - name: Require successful completion of Netplan
+      when: routing_renderer != 'ifupdown'
       ansible.builtin.async_status:
         jid: "{{ routing_apply.ansible_job_id }}"
       register: routing_apply_result
