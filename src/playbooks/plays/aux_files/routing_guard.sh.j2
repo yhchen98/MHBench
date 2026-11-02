@@ -1,18 +1,18 @@
 #!/bin/sh
 set -eu
 
-control_if=
-for path in /sys/class/net/*; do
-    read -r mac < "$path/address"
-    if [ "$mac" = "{{ routing_control_mac }}" ]; then
-        control_if=$(basename "$path")
-        break
-    fi
-done
-if [ -z "$control_if" ]; then
-    echo "Control NIC MAC not found" >&2
-    exit 1
-fi
+interface_for_mac() {
+    for path in /sys/class/net/*; do
+        read -r mac < "$path/address"
+        if [ "$mac" = "$1" ]; then
+            basename "$path"
+            return
+        fi
+    done
+    echo "Interface MAC not found: $1" >&2
+    return 1
+}
+control_if=$(interface_for_mac "{{ routing_control_mac }}")
 
 # Keep transit disabled until the persistent control/data guard is installed.
 sysctl -w net.ipv4.ip_forward=0
@@ -23,6 +23,11 @@ else
 fi
 iptables -w 5 -A MHBENCH_FORWARD -i "$control_if" -j DROP
 iptables -w 5 -A MHBENCH_FORWARD -o "$control_if" -j DROP
+{% for source in routing_response_sources %}
+response_if=$(interface_for_mac "{{ source.mac }}")
+iptables -w 5 -A MHBENCH_FORWARD -s {{ source.prefix }} -i "$response_if" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+iptables -w 5 -A MHBENCH_FORWARD -s {{ source.prefix }} -i "$response_if" -j DROP
+{% endfor %}
 iptables -w 5 -A MHBENCH_FORWARD -j RETURN
 if ! iptables -w 5 -C FORWARD -j MHBENCH_FORWARD >/dev/null 2>&1; then
     iptables -w 5 -I FORWARD 1 -j MHBENCH_FORWARD

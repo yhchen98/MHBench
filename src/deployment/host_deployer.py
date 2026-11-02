@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+from ipaddress import IPv4Network
 import os
 import subprocess
 import tempfile
@@ -264,12 +265,12 @@ class HostDeployer:
 
     def _routing_nics(self, topology: NetworkTopology, host: Host) -> list[dict]:
         primary = topology.get_subnet_for_host(host)
-        attachments = [(primary.name, host.ip_address)]
-        attachments += [(i.subnet, i.ip_address) for i in host.extra_interfaces]
+        attachments = [(primary.name, host.ip_address, [])]
+        attachments += [(i.subnet, i.ip_address, i.response_prefixes) for i in host.extra_interfaces]
         is_router = host.name in {r.host for r in topology.routing.routers}
         ports = []
         try:
-            for index, (name, ip) in enumerate(attachments):
+            for index, (name, ip, prefixes) in enumerate(attachments):
                 network = self._conn.network.find_network(self._n(name), project_id=self._project_id)
                 subnet = self._conn.network.find_subnet(self._n(f"{name}-subnet"), project_id=self._project_id)
                 if network is None or subnet is None:
@@ -281,10 +282,13 @@ class HostDeployer:
                     if sg is None:
                         raise RuntimeError(f"Routing security group for {name!r} is missing.")
                     groups = [sg.id]
+                extra = {}
+                if prefixes:
+                    extra["allowed_address_pairs"] = [{"ip_address": str(p)} for p in prefixes]
                 port = self._conn.network.create_port(
                     name=self._n(f"{host.name}-nic-{index}"), network_id=network.id,
                     fixed_ips=[{"subnet_id": subnet.id, "ip_address": str(ip)}],
-                    is_port_security_enabled=not forwarding_port, security_group_ids=groups,
+                    is_port_security_enabled=not forwarding_port, security_group_ids=groups, **extra,
                 )
                 ports.append(port)
         except Exception:
@@ -305,10 +309,10 @@ class HostDeployer:
                 raise RuntimeError(f"Routing host {host.name!r} is missing.")
             ports = list(self._conn.network.ports(device_id=server.id, project_id=self._project_id))
             primary = topology.get_subnet_for_host(host)
-            attachments = [(primary.name, host.ip_address)]
-            attachments += [(i.subnet, i.ip_address) for i in host.extra_interfaces]
+            attachments = [(primary.name, host.ip_address, [])]
+            attachments += [(i.subnet, i.ip_address, i.response_prefixes) for i in host.extra_interfaces]
             macs = {}
-            for index, (name, ip) in enumerate(attachments):
+            for index, (name, ip, prefixes) in enumerate(attachments):
                 subnet = self._conn.network.find_subnet(self._n(f"{name}-subnet"), project_id=self._project_id)
                 if subnet is None:
                     raise RuntimeError(f"Routing subnet {name!r} is missing.")
@@ -318,6 +322,11 @@ class HostDeployer:
                 if len(matches) != 1 or not matches[0].mac_address:
                     raise RuntimeError(f"Host {host.name!r}: expected one port with {ip} on {name!r}.")
                 port = matches[0]
+                pairs = {(IPv4Network(p["ip_address"]), p["mac_address"].lower())
+                         for p in port.allowed_address_pairs or []}
+                expected_pairs = {(p, port.mac_address.lower()) for p in prefixes}
+                if pairs != expected_pairs:
+                    raise RuntimeError(f"Host {host.name!r}: response addresses do not match the topology.")
                 forwarding_port = host.name in routers and index > 0
                 if port.is_port_security_enabled != (not forwarding_port):
                     raise RuntimeError(f"Host {host.name!r}: port security does not match its interface role.")

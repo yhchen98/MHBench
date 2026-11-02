@@ -50,6 +50,7 @@ class PlaybookRef(BaseModel):
 class HostInterface(BaseModel):
     subnet: str
     ip_address: IPv4Address | None = None
+    response_prefixes: list[IPv4Network] = Field(default_factory=list)
 
 
 class Host(BaseModel):
@@ -104,6 +105,8 @@ class NetworkTopology(BaseModel):
                     raise ValueError(f"Connection references unknown subnet {name!r}")
         if self.routing is not None:
             self.routing.validate_topology(self)
+        elif any(i.response_prefixes for h in self.get_all_hosts() for i in h.extra_interfaces):
+            raise ValueError("response_prefixes require routing")
         return self
 
     def get_ingress_connections(self, subnet_name: str) -> list[SubnetConnection]:

@@ -6,6 +6,8 @@ An optional `routing` section describes IPv4 unicast routing through one router 
 
 Keep every host's primary `ip_address` on a control subnet. Declare data NICs in `extra_interfaces`, using existing subnet names and static `ip_address` values. A router's extra interfaces connect its data LANs and peering links. An end host has one data interface and a gateway on that LAN.
 
+An end-host data interface can optionally declare `response_prefixes` from another data LAN. This requires a dedicated LAN containing only that end host and its router. OpenStack permits these reply-source addresses on the protected port with its own MAC; the edge router permits only established/related replies from those prefixes and drops new forwarding from them. This grants no new application connection, installs no guest address or route, and leaves control ports unchanged.
+
 Data subnets have no primary hosts and explicitly set `external: false` and `internet_egress: false`. Use distinct, non-overlapping control and data subnets. The routers and hosts retain their primary control identities for management and Arena access.
 
 ## Routing fields

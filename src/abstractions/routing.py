@@ -203,6 +203,22 @@ class RoutingConfig(BaseModel):
             if not any(i.subnet == gateway.subnet and i.ip_address == gateway.gateway
                        for r in self.routers for i in hosts[r.host].extra_interfaces):
                 raise ValueError(f"gateway {gateway.gateway} is not a router interface on the host LAN")
+        for host in hosts.values():
+            for interface in host.extra_interfaces:
+                prefixes = interface.response_prefixes
+                if not prefixes:
+                    continue
+                if host.name not in gateways:
+                    raise ValueError("response_prefixes require an end-host data interface")
+                if len(set(prefixes)) != len(prefixes):
+                    raise ValueError("response_prefixes must be unique")
+                if any(other.name not in routers and other.name != host.name
+                       and any(i.subnet == interface.subnet for i in other.extra_interfaces)
+                       for other in hosts.values()):
+                    raise ValueError("response_prefixes require a dedicated end-host/router LAN")
+                if any(not any(prefix.subnet_of(subnets[n].cidr)
+                               for n in lan_names - {interface.subnet}) for prefix in prefixes):
+                    raise ValueError("response_prefixes must be confined to another declared data LAN")
         for router in self.routers:
             connected = {subnets[i.subnet].cidr for i in hosts[router.host].extra_interfaces
                          if i.subnet in lan_names}
