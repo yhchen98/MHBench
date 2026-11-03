@@ -299,7 +299,6 @@ class Experiment:
         present = any(resources.values())
         require(present if existing else not present,
                 "No deployment to adopt" if existing else "Project already exists; use --existing to verify and delete it")
-        self.owned = True
 
     def provider(self):
         resources = self.resources()
@@ -761,8 +760,8 @@ def main(argv=None):
     succeeded = False
     try:
         experiment.namespace(adopt)
+        experiment.owned = not args.verify_only
         if args.verify_only:
-            experiment.owned = False
             experiment.verify_baseline()
         else:
             if not args.existing:
