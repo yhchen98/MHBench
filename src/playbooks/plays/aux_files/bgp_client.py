@@ -9,6 +9,10 @@ import urllib.request
 
 CONFIG_PATH = "/etc/mhbench/client.json"
 INTERVAL_SECONDS = 30
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 with open(CONFIG_PATH, encoding="utf-8") as handle:
     CONFIG = json.load(handle)
@@ -23,7 +27,7 @@ NAME_RE = re.compile(r"\bname=[\"']([^\"']+)[\"']", re.I)
 
 
 def fetch(url):
-    request = urllib.request.Request(url, headers={"User-Agent": "mhbench-client/1"})
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(request, timeout=10) as response:
         return response.status, response.read().decode("utf-8", "replace")
 
@@ -38,7 +42,7 @@ def submit(form_action, html):
     url = urllib.parse.urljoin(PORTAL + "/", action)
     data = urllib.parse.urlencode(fields).encode("utf-8")
     request = urllib.request.Request(
-        url, data=data, headers={"User-Agent": "mhbench-client/1"})
+        url, data=data, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(request, timeout=10) as response:
         response.read()
         return response.status

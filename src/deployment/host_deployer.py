@@ -198,7 +198,7 @@ class HostDeployer:
 
                 create_kwargs = dict(
                     name=self._n(host.name),    # OpenStack display label — experiment-prefixed, collision-safe
-                    hostname=host.name,         # in-VM hostname — clean DNS-safe host-N, decoupled from the prefix
+                    hostname=_dns_safe(host.hostname or host.name),  # in-VM/OS name; FRR/BGP expose it
                     imageRef=image.id,
                     flavorRef=flavor.id,
                     networks=[network_spec],
@@ -466,25 +466,28 @@ class HostDeployer:
             return False
 
     def teardown(self, topology: NetworkTopology) -> None:
+        mgmt_name = self._n("management_host")
+        management_servers = []
         if self._management:
-            mgmt_name = self._n("management_host")
-            for server in self._conn.compute.servers(name=mgmt_name, project_id=self._project_id):
-                for port in self._conn.network.ports(device_id=server.id):
-                    for fip in self._conn.network.ips(port_id=port.id):
-                        self._conn.network.delete_ip(fip.id)
-                        logger.info("Released floating IP: %s", fip.floating_ip_address)
+            management_servers = [
+                server for server in self._conn.compute.servers(name=mgmt_name, project_id=self._project_id)
+                if server.name == mgmt_name
+            ]
+        for server in management_servers:
+            for port in self._conn.network.ports(device_id=server.id):
+                for fip in self._conn.network.ips(port_id=port.id):
+                    self._conn.network.delete_ip(fip.id)
+                    logger.info("Released floating IP: %s", fip.floating_ip_address)
 
         pending: dict[str, str] = {}
-
-        if self._management:
-            for server in self._conn.compute.servers(name=self._n("management_host"), project_id=self._project_id):
-                if self._delete_server(server.id, self._n("management_host")):
-                    pending[server.id] = self._n("management_host")
+        for server in management_servers:
+            if self._delete_server(server.id, mgmt_name):
+                pending[server.id] = mgmt_name
 
         for host in topology.get_all_hosts():
             matches = list(self._conn.compute.servers(name=self._n(host.name), project_id=self._project_id))
             for server in matches:
-                if topology.routing is not None and server.name != self._n(host.name):
+                if server.name != self._n(host.name):
                     continue
                 if self._delete_server(server.id, self._n(host.name)):
                     pending[server.id] = self._n(host.name)
@@ -541,7 +544,7 @@ class HostDeployer:
             network_spec["fixed_ip"] = str(host.ip_address)
         logger.info("Submitting single host: %s  image=%s  flavor=%s", self._n(host.name), image.name, flavor.name)
         server = self._conn.compute.create_server(
-            name=self._n(host.name), hostname=_dns_safe(host.name), imageRef=image.id, flavorRef=flavor.id,
+            name=self._n(host.name), hostname=_dns_safe(host.hostname or host.name), imageRef=image.id, flavorRef=flavor.id,
             networks=[network_spec], security_groups=[{"name": self._n(subnet.sg_name)}],
             key_name=self._ssh_key_name, config_drive=True,
             # Tag dynamically-added hosts (decoys) so teardown can reap them: they are PREFIXED like

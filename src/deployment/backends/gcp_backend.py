@@ -53,9 +53,8 @@ class GCPBackend(CloudBackend):
       * management floating IP         -> the management instance's external IP
       * OpenStack flavor / image name  -> GCP machine type / image (via config maps)
 
-    Everything is prefixed by the experiment's ``project_name`` exactly as the
-    OpenStack backend prefixes its resources, so concurrent experiments never
-    collide and teardown matches purely by name.
+    Network resources use the experiment's project_name prefix. Instance names
+    use topology host names, so experiments must run sequentially within a zone.
     """
 
     name = "gcp"
@@ -102,8 +101,9 @@ class GCPBackend(CloudBackend):
         """Instance name — deliberately NOT experiment-prefixed, unlike _n(). GCP's internal DNS
         serves a reverse (PTR) record built from the instance name, which the attacker resolves during
         recon: an experiment-prefixed instance name (e.g. gcp-eqs-opus46-shell-staticall-t0-webserver0)
-        would hand the attacker the whole benchmark config. The plain topology name (webserver0) reads
-        like an ordinary host, matching the guest hostname. This is safe ONLY because GCP experiments
+        would hand the attacker the whole benchmark config. Use the topology name
+        for resource identity; the guest hostname can be overridden independently.
+        This is safe ONLY because GCP experiments
         run SEQUENTIALLY (config.gcp.yaml max_active_experiments=1), so plain names are unique per zone;
         teardown_hosts deletes by the same _inst() name and _sweep_vpc() catches anything left over.
         Network resources (VPC/subnet/firewall/router) keep _n() — they are not attacker-visible and
@@ -473,7 +473,7 @@ class GCPBackend(CloudBackend):
                 raise RuntimeError(f"No subnet found for host '{host.name}'.")
             hname = self._inst(host.name)
             specs.append((hname, self._build_instance(
-                name=hname, host_name=host.name, vm_type=host.vm_type, flavor=host.flavor,
+                name=hname, host_name=host.hostname or host.name, vm_type=host.vm_type, flavor=host.flavor,
                 subnet_name=subnet.name, subnet_tag=self._tag(self._n(subnet.name)),
                 fixed_ip=str(host.ip_address) if host.ip_address else None, external=False,
             )))
