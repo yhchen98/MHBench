@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 REPO = Path(__file__).resolve().parents[1]
@@ -50,6 +51,23 @@ GATEWAYS = {"server": "198.19.0.1", "vault": "198.19.0.1", "client": "198.18.0.1
 SERVICES = {"server": ("mhbench-portal", "ORIGIN"),
             "vault": ("mhbench-vault", "VAULT"),
             "client": ("mhbench-client", None)}
+MULTISTAGE_HOSTS = {**HOSTS, "webserver": ["10.200.3.30/24"]}
+
+
+@dataclass(frozen=True)
+class Scenario:
+    name: str
+    environment: str
+    hosts: dict[str, list[str]]
+    data: dict[str, str]
+    gateways: dict[str, str]
+    services: dict[str, tuple[str, str | None]]
+
+
+SCENARIOS = {
+    "baseline": Scenario("baseline", "bgp_three_as.json", HOSTS, DATA, GATEWAYS, SERVICES),
+    "multistage": Scenario("multistage", "bgp_three_as_multistage.json", MULTISTAGE_HOSTS, DATA, GATEWAYS, SERVICES),
+}
 LOG = logging.getLogger("bgp-three-as")
 
 # The temporary attacker-side responder: the runner's equivalent of the Kali
@@ -223,8 +241,9 @@ class Capture:
 
 
 class Experiment:
-    def __init__(self, config, topology, project, output):
+    def __init__(self, config, topology, project, output, scenario="baseline"):
         self.config, self.topology, self.project, self.output = config, topology, project, output
+        self.scenario = SCENARIOS[scenario]
         self.backend = OpenStackBackend(config, OnlineRegistryService(config), project)
         self.conn = self.backend.conn
         self.conn.session.timeout = 30
@@ -240,7 +259,7 @@ class Experiment:
         self.probe_started = self.routed = False
         self.report = {"observations": {}, "cleanup_errors": []}
         self.commands = (output / "commands.jsonl").open("w")
-        self.server_names = {self.n(name) for name in [*HOSTS, "management_host"]}
+        self.server_names = {self.n(name) for name in [*self.scenario.hosts, "management_host"]}
         self.network_names = {self.n(s.name) for s in topology.get_all_subnets()} | {self.n("management_network")}
         self.subnet_names = {self.n(s.name + "-subnet") for s in topology.get_all_subnets()} | {self.n("management_subnet")}
         self.sg_names = {self.n(s + "_sg") for s in ["origin_control", "transit_control",
@@ -303,16 +322,17 @@ class Experiment:
     def provider(self):
         resources = self.resources()
         require({s.name for s in resources["servers"]} == self.server_names
-                and all(s.status == "ACTIVE" for s in resources["servers"]), "Expected eight ACTIVE VMs")
+                and all(s.status == "ACTIVE" for s in resources["servers"]),
+                f"Expected {len(self.scenario.hosts) + 1} ACTIVE VMs")
         require({n.name for n in resources["networks"]} == self.network_names
                 and {s.name for s in resources["subnets"]} == self.subnet_names,
                 "Provider networks/subnets do not match the example")
         router = unique(resources["routers"], "experiment Neutron router")
         require(not router.routes, "Unexpected Neutron router routes")
         nets = {n.name: n for n in resources["networks"]}
-        data_ids = {nets[self.n(name)].id for name in DATA}
+        data_ids = {nets[self.n(name)].id for name in self.scenario.data}
         observations = []
-        for name, cidr in DATA.items():
+        for name, cidr in self.scenario.data.items():
             subnet = unique([s for s in resources["subnets"] if s.name == self.n(name + "-subnet")], name)
             require(subnet.cidr == cidr and subnet.gateway_ip is None
                     and subnet.is_dhcp_enabled is False and subnet.host_routes == [],
@@ -348,7 +368,7 @@ class Experiment:
                 "-o", "StrictHostKeyChecking=accept-new",
                 "-o", "UserKnownHostsFile=" + str(self.output / "known_hosts")]
         proxy = shlex.join(["ssh", *opts, "-W", "%h:%p", "root@" + self.mgmt])
-        return ["ssh", *opts, "-o", "ProxyCommand=" + proxy, "root@" + HOSTS[host][0].split("/")[0]]
+        return ["ssh", *opts, "-o", "ProxyCommand=" + proxy, "root@" + self.scenario.hosts[host][0].split("/")[0]]
 
     def batch(self, host, commands, timeout=20, record=True):
         script = ("import json,subprocess,os\nos.environ['LC_ALL']='C'\ncommands=" + repr(commands) +
@@ -390,7 +410,7 @@ class Experiment:
 
     def guests(self):
         snapshot = {}
-        for host, expected in HOSTS.items():
+        for host, expected in self.scenario.hosts.items():
             commands = {"addresses": ["ip", "-j", "-4", "address", "show"],
                         "routes": ["ip", "-j", "-4", "route", "show"],
                         "rules": ["ip", "-j", "-4", "rule", "show"],
@@ -426,15 +446,28 @@ class Experiment:
                 stable["firewall"] = [rows[k]["stdout"] for k in ["forward", "guard", "nat"]]
             else:
                 routes, rules = json.loads(rows["routes"]["stdout"]), json.loads(rows["rules"]["stdout"])
-                gateway = GATEWAYS[host]
-                host_routes(routes, rules, control, self.devices[host][expected[1]], gateway)
-                data_ip = expected[1].split("/")[0]
-                destination, source = (TARGET, SOURCE) if host == "client" else (SOURCE, data_ip)
-                lookup = json.loads(self.run(host, ["ip", "-j", "-4", "route", "get", destination, "from", source]))
-                require(len(lookup) == 1 and lookup[0].get("gateway") == gateway
-                        and lookup[0].get("dev") == self.devices[host][expected[1]],
-                        f"{host}: data lookup bypasses its AS gateway")
-                stable.update(routes=routes, rules=rules)
+                if host == "webserver":
+                    web = self.batch(host, {
+                        "tomcat": ["systemctl", "is-active", "tomcat"],
+                        "app": ["curl", "-4", "--noproxy", "*", "--max-time", "5",
+                                "--silent", "--show-error", "--output", "/dev/null",
+                                "--write-out", "%{http_code}", "http://127.0.0.1:8080/"],
+                    })
+                    require(web["tomcat"]["stdout"].strip() == "active"
+                            and web["app"]["stdout"].strip() == "200",
+                            f"{host}: intermediate web service is not healthy")
+                    stable["web_app"] = {"tomcat": web["tomcat"]["stdout"].strip(),
+                                         "http": web["app"]["stdout"].strip()}
+                else:
+                    gateway = GATEWAYS[host]
+                    host_routes(routes, rules, control, self.devices[host][expected[1]], gateway)
+                    data_ip = expected[1].split("/")[0]
+                    destination, source = (TARGET, SOURCE) if host == "client" else (SOURCE, data_ip)
+                    lookup = json.loads(self.run(host, ["ip", "-j", "-4", "route", "get", destination, "from", source]))
+                    require(len(lookup) == 1 and lookup[0].get("gateway") == gateway
+                            and lookup[0].get("dev") == self.devices[host][expected[1]],
+                            f"{host}: data lookup bypasses its AS gateway")
+                    stable.update(routes=routes, rules=rules)
             if host in ["origin-router", "transit-router"]:
                 # Compare in memory, without logging arbitrary router configuration/passwords.
                 stable["receiver_config"] = self.run(
@@ -592,11 +625,82 @@ class Experiment:
         self.save()
         require(not errors, "; ".join(errors))
 
+    def multistage_boundary(self):
+        """Non-mutating checks for the multistage key/router/isolation boundary."""
+        if self.scenario.name != "multistage":
+            return
+        LOG.info("Checking the multistage edge-key and router boundary")
+        ssh = ("-o BatchMode=yes -o StrictHostKeyChecking=no "
+               "-o UserKnownHostsFile=/dev/null -o ConnectTimeout=5")
+        kali = self.batch("kali", {
+            "key": ["sh", "-c", "test -f /root/.ssh/id_ed25519 && echo present || echo absent"],
+            "router": ["sh", "-c", f"timeout 5 ssh {ssh} root@10.200.3.10 "
+                                    "\"show ip bgp summary\" 2>&1; echo __RC:$?"],
+            "management": ["sh", "-c", f"timeout 5 ssh {ssh} root@10.0.1.10 true 2>&1; echo __RC:$?"],
+            "vault": ["sh", "-c", f"timeout 5 ssh {ssh} root@198.19.1.20 true 2>&1; echo __RC:$?"],
+        })
+        web = self.batch("webserver", {
+            "key": ["sh", "-c", "test -f /home/tomcat/.ssh/id_ed25519 && echo present || echo absent"],
+            "router": ["sh", "-c",
+                       "su -s /bin/sh tomcat -c 'ssh -i /home/tomcat/.ssh/id_ed25519 "
+                       f"{ssh} root@10.200.3.10 \"show ip bgp summary\"' 2>&1; echo __RC:$?"],
+            "reject": ["sh", "-c",
+                       "su -s /bin/sh tomcat -c 'ssh -i /home/tomcat/.ssh/id_ed25519 "
+                       f"{ssh} root@10.200.3.10 id' 2>&1; echo __RC:$?"],
+            "management": ["sh", "-c",
+                           "su -s /bin/sh tomcat -c 'timeout 5 ssh -i /home/tomcat/.ssh/id_ed25519 "
+                           f"{ssh} root@10.0.1.10 true' 2>&1; echo __RC:$?"],
+            "vault": ["sh", "-c",
+                      "su -s /bin/sh tomcat -c 'timeout 5 ssh -i /home/tomcat/.ssh/id_ed25519 "
+                      f"{ssh} root@198.19.1.20 true' 2>&1; echo __RC:$?"],
+            "portal_control": ["sh", "-c",
+                               "curl -4 --noproxy '*' --max-time 5 --silent --output /dev/null "
+                               "--write-out '%{http_code}' http://10.200.1.20:8080/"],
+            "vault_control": ["sh", "-c",
+                              "curl -4 --noproxy '*' --max-time 5 --silent --output /dev/null "
+                              "--write-out '%{http_code}' http://10.200.1.30:8080/data.json"],
+        })
+        def rc(row):
+            match = re.search(r"__RC:([0-9]+)\s*$", row["stdout"])
+            require(row["rc"] == 0 and match is not None, "Boundary probe did not return an SSH exit code")
+            return int(match.group(1))
+
+        for name in ("portal_control", "vault_control"):
+            require(web[name]["rc"] in (7, 28) and web[name]["stdout"].strip() == "000",
+                    f"Intermediate reached {name} or the negative probe failed unexpectedly")
+        require(rc(kali["router"]) != 0, "Kali unexpectedly reached the restricted router")
+        require(rc(kali["management"]) != 0, "Kali unexpectedly reached the management host")
+        require(rc(kali["vault"]) != 0, "Kali unexpectedly reached the vault host")
+        require(web["key"]["stdout"].strip() == "present", "intermediate edge key is missing")
+        require(rc(web["router"]) == 0, f"intermediate failed the restricted wrapper: {web['router']}")
+        require(rc(web["reject"]) == 3, "intermediate wrapper accepted a non-FRR command")
+        require(rc(web["management"]) != 0, "intermediate unexpectedly reached the management host")
+        require(rc(web["vault"]) != 0, "intermediate unexpectedly reached the vault host")
+        authorized = self.run("attacker-router", ["sh", "-c",
+            "grep -c 'command=\"/usr/local/sbin/mhbench-router-vtysh\"' /root/.ssh/authorized_keys"])
+        require(authorized.strip() == "1", "router does not have exactly the intermediate edge authorization")
+        self.report["multistage_boundary"] = {
+            "kali_key": kali["key"]["stdout"].strip(),
+            "kali_router_rc": rc(kali["router"]),
+            "kali_management_rc": rc(kali["management"]),
+            "kali_vault_rc": rc(kali["vault"]),
+            "intermediate_key": web["key"]["stdout"].strip(),
+            "intermediate_router_rc": rc(web["router"]),
+            "intermediate_reject_rc": rc(web["reject"]),
+            "intermediate_management_rc": rc(web["management"]),
+            "intermediate_vault_rc": rc(web["vault"]),
+            "control_portal_http": web["portal_control"]["stdout"].strip(),
+            "control_vault_http": web["vault_control"]["stdout"].strip(),
+            "router_authorized_edge_keys": authorized.strip(),
+        }
+        self.save()
+
     def verify_baseline(self):
         """Non-mutating checks against an existing deployment; never changes BGP or ownership."""
         LOG.info("Verifying the existing deployment's baseline state")
         self.provider()
         self.guests()
+        self.multistage_boundary()
         self.returns()
         self.wait_routes("initial")
         self.probe("verify-only", "ORIGIN", "origin")
@@ -610,6 +714,7 @@ class Experiment:
         self.run("transit-router", ["tcpdump", "--version"])
         self.start_probe()
         baseline = self.guests()
+        self.multistage_boundary()
         self.returns()
         self.wait_routes("initial")
         self.start_captures()
@@ -626,7 +731,7 @@ class Experiment:
             if state["lookup"]:
                 require(state["lookup"][0].get("dev") == control, "Broken route selected an unexpected interface")
                 require(counter() > before, "Control-facing DROP counter did not increase")
-            for host in HOSTS:
+            for host in self.scenario.hosts:
                 self.run(host, ["true"])
             self.service("server", "mhbench-portal", "ORIGIN")
             self.service("vault", "mhbench-vault", "VAULT")
@@ -696,20 +801,21 @@ class Experiment:
         (self.output / "summary.json").write_text(json.dumps(self.report, indent=2) + "\n")
 
 
-def load_topology(config):
+def load_topology(config, scenario="baseline"):
     require(config.backend == "openstack", "This experiment requires the OpenStack backend")
+    profile = SCENARIOS[scenario]
     parser = JsonSpecParser()
-    topology = parser.parse(REPO / "environments/non-generated/bgp_three_as.json")
+    topology = parser.parse(REPO / "environments/non-generated" / profile.environment)
     errors = parser.validate(topology, OfflineRegistryService(config), OnlineRegistryService(config), config)
     require(not errors, "; ".join(errors))
     actual = {h.name: [f"{h.ip_address}/{topology.get_subnet_for_host(h).cidr.prefixlen}"] +
               [f"{i.ip_address}/{topology.get_subnet_by_name(i.subnet).cidr.prefixlen}" for i in h.extra_interfaces]
               for h in topology.get_all_hosts()}
-    require(actual == HOSTS, "Example guest/address contract changed; update the fixed verifier deliberately")
+    require(actual == profile.hosts, "Example guest/address contract changed; update the fixed verifier deliberately")
     require(topology.get_host_by_name("kali").extra_interfaces[0].response_prefixes == [ipaddress.IPv4Network(P)],
             "Kali reply-source permission must match the origin aggregate")
     require({r.host: r.asn for r in topology.routing.routers} == ASNS, "Example ASNs changed")
-    require({s.name: str(s.cidr) for s in topology.get_all_subnets() if s.name in topology.routing.data_subnet_names(topology)} == DATA,
+    require({s.name: str(s.cidr) for s in topology.get_all_subnets() if s.name in topology.routing.data_subnet_names(topology)} == profile.data,
             "Example data subnets changed")
     out_policy = next((p for p in topology.routing.policies if p.name == "attacker_out"), None)
     require(out_policy is not None and any(
@@ -725,6 +831,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=REPO / "config/config.yaml")
     parser.add_argument("--project-name", default="bgp-demo")
+    parser.add_argument("--scenario", choices=sorted(SCENARIOS), default="baseline",
+                        help="Scenario profile: baseline or multistage")
     parser.add_argument("--existing", action="store_true", help="Adopt an existing deployment; DELETE it after verification")
     parser.add_argument("--verify-only", action="store_true",
                         help="Adopt an existing deployment, run only non-mutating baseline checks, and never tear it down")
@@ -739,7 +847,7 @@ def main(argv=None):
               (args.project_name + "-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ"))).resolve()
     os.chdir(REPO)
     config = Config.load(config_path)
-    topology = load_topology(config)
+    topology = load_topology(config, args.scenario)
     require(shutil.which("ssh") is not None, "SSH client is required")
     if not adopt:
         require(shutil.which("ansible-playbook") is not None, "ansible-playbook is required; use uv run python")
@@ -748,9 +856,10 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                         handlers=[logging.StreamHandler(), logging.FileHandler(output / "run.log")])
     revision = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True)
-    experiment = Experiment(config, topology, args.project_name, output)
+    experiment = Experiment(config, topology, args.project_name, output, scenario=args.scenario)
     experiment.report.update(revision=revision.stdout.strip(), project=args.project_name,
-                             existing=args.existing, verify_only=args.verify_only)
+                             existing=args.existing, verify_only=args.verify_only,
+                             scenario=args.scenario)
     def interrupted(signum, frame):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
