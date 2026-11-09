@@ -77,7 +77,7 @@ Let `P = 198.19.0.0/23`, `H = 198.19.0.0/24`, `C = 198.18.0.0/24`, and `A = 10.2
 | --- | --- | --- | --- |
 | Transit → origin or attacker | Provider → customer | `customer_in`: P and its /24s, exact A, preference 200 on both links | `to_customer`: exact C and A, P and its /24s |
 | Origin → transit | Customer → provider | `origin_in`: exact C and A, preference 100 | `origin_out`: exact P |
-| Attacker → transit | Customer → provider | `attacker_in`: exact C and P, preference 100 | `attacker_out`: exact A, P and its /24s |
+| Attacker → transit | Customer → provider | `AS65002_in`: exact C and P, preference 100 | `AS65002_out`: exact A and P subprefixes |
 
 Transit's filter bounds deaggregation at /24 but deliberately does not bind prefixes to the owning customer. It therefore accepts H from AS65003 with an ordinary first-AS-valid path. Both customer imports keep preference 200. P and H are distinct routes; longest-prefix forwarding selects H for the portal address. No receiving policy or preference changes during the attack.
 

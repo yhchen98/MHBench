@@ -36,7 +36,7 @@ def render_frr(topology: NetworkTopology, router: Router) -> str:
             continue
         for index, rule in enumerate(policy.rules, 1):
             sequence = index * 10
-            name = f"mhb_{policy.name}_{sequence}"
+            name = f"pfx_{policy.name}_{sequence}"
             minimum, maximum = rule.prefix_lengths
             match = str(rule.prefix)
             if minimum > rule.prefix.prefixlen:
