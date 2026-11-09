@@ -267,8 +267,8 @@
           },
           {
             "router": "attacker-router",
-            "import_policy": "attacker_in",
-            "export_policy": "attacker_out"
+            "import_policy": "AS65002_in",
+            "export_policy": "AS65002_out"
           }
         ]
       }
@@ -337,7 +337,7 @@
         "default_action": "deny"
       },
       {
-        "name": "attacker_in",
+        "name": "AS65002_in",
         "rules": [
           {
             "prefix": "198.18.0.0/24",
@@ -353,12 +353,12 @@
         "default_action": "deny"
       },
       {
-        "name": "attacker_out",
+        "name": "AS65002_out",
         "rules": [
           {
             "prefix": "198.19.0.0/23",
             "action": "permit",
-            "max_prefix_length": 24
+            "max_prefix_length": 32
           },
           {
             "prefix": "10.250.0.8/30",

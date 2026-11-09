@@ -817,10 +817,17 @@ def load_topology(config, scenario="baseline"):
     require({r.host: r.asn for r in topology.routing.routers} == ASNS, "Example ASNs changed")
     require({s.name: str(s.cidr) for s in topology.get_all_subnets() if s.name in topology.routing.data_subnet_names(topology)} == profile.data,
             "Example data subnets changed")
-    out_policy = next((p for p in topology.routing.policies if p.name == "attacker_out"), None)
+    in_policy = next((p for p in topology.routing.policies if p.name == "customer_in"), None)
+    require(in_policy is not None and any(
+                str(rule.prefix) == P and rule.max_prefix_length == 24 for rule in in_policy.rules),
+            "Transit import policy must preserve the /24 deaggregation boundary")
+    out_policy = next((p for p in topology.routing.policies if p.name == "AS65002_out"), None)
     require(out_policy is not None and any(
-                str(rule.prefix) == P and rule.max_prefix_length == 24 for rule in out_policy.rules),
-            "Attacker export policy must be the generic P/max-24 form")
+                str(rule.prefix) == P
+                and (rule.max_prefix_length or rule.prefix.prefixlen) >= 24
+                for rule in out_policy.rules),
+            "Attacker export policy must permit the victim aggregate's /24 "
+            "without encoding the exact subprefix length")
     for router in topology.routing.routers:
         require(sorted(p["address"] for p in router_peers(topology, router)) == sorted(PEERS[router.host]),
                 "Example peers changed")
