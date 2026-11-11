@@ -363,13 +363,9 @@
         "name": "AS65002_out",
         "rules": [
           {
-            "prefix": "198.19.0.0/23",
+            "prefix": "0.0.0.0/0",
             "action": "permit",
             "max_prefix_length": 32
-          },
-          {
-            "prefix": "10.250.0.8/30",
-            "action": "permit"
           }
         ],
         "default_action": "deny"
