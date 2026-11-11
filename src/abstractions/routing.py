@@ -227,7 +227,15 @@ class RoutingConfig(BaseModel):
             if not set(router.advertised_prefixes) <= connected:
                 raise ValueError("initial advertised prefixes must be connected router LANs")
         lans = [subnets[n].cidr for n in lan_names]
+        export_only = (
+            {e.export_policy for p in self.peerings for e in p.endpoints}
+            - {e.import_policy for p in self.peerings for e in p.endpoints}
+        )
         for policy in self.policies:
             for rule in policy.rules:
                 if rule.action == "permit" and not any(rule.prefix.subnet_of(n) for n in lans):
-                    raise ValueError("permit rules must be confined to declared data LAN prefixes")
+                    if (policy.name in export_only and rule.prefix.prefixlen == 0
+                            and rule.prefix_lengths == (0, 32)):
+                        continue
+                    raise ValueError("permit rules must be confined to declared data LAN prefixes "
+                                     "or permit all IPv4 in an export-only policy")

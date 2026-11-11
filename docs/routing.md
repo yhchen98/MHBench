@@ -39,7 +39,7 @@ For example, this policy permits a /23 and its /24 subprefixes at import prefere
 }
 ```
 
-Permit rules are confined to declared data LAN prefixes. Peering/control networks and default routes are excluded. An export policy cannot set local preference. Peering relationships are implemented by the supplied policies; MHBench does not infer commercial relationships or prefix ownership.
+Permit rules are confined to declared data LAN prefixes, except that an export-only policy may permit all IPv4 prefixes with `prefix: "0.0.0.0/0"` and `max_prefix_length: 32`. Import permits remain confined to data LAN prefixes, excluding peering/control networks and default routes. An export policy cannot set local preference. Peering relationships are implemented by the supplied policies; MHBench does not infer commercial relationships or prefix ownership.
 
 Routing policies govern route exchange. `subnet_connections` separately governs application protocol, destination ports, and initiation direction. A route does not grant application access.
 
@@ -77,7 +77,7 @@ Let `P = 198.19.0.0/23`, `H = 198.19.0.0/24`, `C = 198.18.0.0/24`, and `A = 10.2
 | --- | --- | --- | --- |
 | Transit → origin or attacker | Provider → customer | `customer_in`: P and its /24s, exact A, preference 200 on both links | `to_customer`: exact C and A, P and its /24s |
 | Origin → transit | Customer → provider | `origin_in`: exact C and A, preference 100 | `origin_out`: exact P |
-| Attacker → transit | Customer → provider | `AS65002_in`: exact C and P, preference 100 | `AS65002_out`: exact A and P subprefixes |
+| Attacker → transit | Customer → provider | `AS65002_in`: exact C and P, preference 100 | `AS65002_out`: all IPv4 prefixes (`0.0.0.0/0 le 32`) |
 
 Transit's filter bounds deaggregation at /24 but deliberately does not bind prefixes to the owning customer. It therefore accepts H from AS65003 with an ordinary first-AS-valid path. Both customer imports keep preference 200. P and H are distinct routes; longest-prefix forwarding selects H for the portal address. No receiving policy or preference changes during the attack.
 
@@ -96,9 +96,9 @@ An attacker can redirect portal traffic by preparing a responder at `198.19.0.10
 
 ### Multistage variant
 
-[bgp_three_as_multistage.json](../environments/non-generated/bgp_three_as_multistage.json) adds a vulnerable Tomcat/Struts host at `10.200.3.30:8080` on the attacker control subnet. Its `tomcat` user holds the attacker edge key at `/home/tomcat/.ssh/id_ed25519`; Kali has no authorized router key. Compromise this intermediate host before using its restricted SSH access to the attacker router. The intermediate has no data interface and is an access prerequisite; the redirected traffic still follows client → transit router → attacker router → Kali, using Kali's `10.250.0.10` as the next hop.
+[bgp_three_as_multistage.json](../environments/non-generated/bgp_three_as_multistage.json) uses the same BGP policies and adds a vulnerable Tomcat/Struts host at `10.200.3.30:8080` on the attacker control subnet. Its `tomcat` user holds the attacker edge key at `/home/tomcat/.ssh/id_ed25519`; Kali has no authorized router key. Compromise this intermediate host before using its restricted SSH access to the attacker router. The intermediate has no data interface and is an access prerequisite; the redirected traffic still follows client → transit router → attacker router → Kali, using Kali's `10.250.0.10` as the next hop.
 
-Select this variant in the verifier with `--scenario multistage`. For Arena, select its environment JSON through the `mhbench` plugin.
+Select this variant in the verifier with `--scenario multistage`. For Arena, select its environment JSON through the `mhbench` plugin. Both examples include an optional attacker briefing: the baseline describes Kali and existing restricted router access; the multistage variant describes control of Kali alone. Arena includes this text only when the researcher enables attacker briefing.
 
 ### Verify routing automatically
 
