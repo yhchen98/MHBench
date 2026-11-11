@@ -96,6 +96,7 @@ class NetworkTopology(BaseModel):
     subnet_connections: list[SubnetConnection] = Field(default_factory=list)
     playbooks: list[PlaybookRef] = Field(default_factory=list)
     routing: RoutingConfig | None = None
+    attacker_briefing: str | None = None
 
     @model_validator(mode="after")
     def validate_connections(self) -> NetworkTopology:

@@ -98,7 +98,7 @@ An attacker can redirect portal traffic by preparing a responder at `198.19.0.10
 
 [bgp_three_as_multistage.json](../environments/non-generated/bgp_three_as_multistage.json) uses the same BGP policies and adds a vulnerable Tomcat/Struts host at `10.200.3.30:8080` on the attacker control subnet. Its `tomcat` user holds the attacker edge key at `/home/tomcat/.ssh/id_ed25519`; Kali has no authorized router key. Compromise this intermediate host before using its restricted SSH access to the attacker router. The intermediate has no data interface and is an access prerequisite; the redirected traffic still follows client → transit router → attacker router → Kali, using Kali's `10.250.0.10` as the next hop.
 
-Select this variant in the verifier with `--scenario multistage`. For Arena, select its environment JSON through the `mhbench` plugin.
+Select this variant in the verifier with `--scenario multistage`. For Arena, select its environment JSON through the `mhbench` plugin. Both examples include an optional attacker briefing: the baseline describes Kali and existing restricted router access; the multistage variant describes control of Kali alone. Arena includes this text only when the researcher enables attacker briefing.
 
 ### Verify routing automatically
 
