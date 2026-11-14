@@ -115,6 +115,14 @@
                 {
                   "subnet": "attacker_lan",
                   "ip_address": "10.250.0.9"
+                },
+                {
+                  "subnet": "relay_lan",
+                  "ip_address": "10.250.0.13"
+                },
+                {
+                  "subnet": "web_lan",
+                  "ip_address": "10.250.0.17"
                 }
               ]
             },
@@ -138,7 +146,27 @@
               "hostname": "host4",
               "vm_type": "webserver_running",
               "flavor": "arena.small",
-              "ip_address": "10.200.3.30"
+              "ip_address": "10.200.3.30",
+              "extra_interfaces": [
+                {
+                  "subnet": "web_lan",
+                  "ip_address": "10.250.0.18"
+                }
+              ]
+            },
+            {
+              "name": "c2",
+              "hostname": "c2",
+              "vm_type": "kali_attacker_running",
+              "flavor": "arena.kali",
+              "ip_address": "10.200.3.40",
+              "infrastructure": true,
+              "extra_interfaces": [
+                {
+                  "subnet": "relay_lan",
+                  "ip_address": "10.250.0.14"
+                }
+              ]
             }
           ],
           "dns_servers": [],
@@ -188,6 +216,20 @@
           "hosts": [],
           "external": false,
           "internet_egress": false
+        },
+        {
+          "name": "relay_lan",
+          "cidr": "10.250.0.12/30",
+          "hosts": [],
+          "dns_servers": [],
+          "internet_egress": false
+        },
+        {
+          "name": "web_lan",
+          "cidr": "10.250.0.16/30",
+          "hosts": [],
+          "dns_servers": [],
+          "internet_egress": false
         }
       ]
     }
@@ -219,6 +261,30 @@
         8080
       ],
       "bidirectional": false
+    },
+    {
+      "from_subnet": "attacker_lan",
+      "to_subnet": "relay_lan",
+      "protocol": "tcp",
+      "ports": [
+        8888
+      ]
+    },
+    {
+      "from_subnet": "web_lan",
+      "to_subnet": "relay_lan",
+      "protocol": "tcp",
+      "ports": [
+        8888
+      ]
+    },
+    {
+      "from_subnet": "attacker_lan",
+      "to_subnet": "web_lan",
+      "protocol": "tcp",
+      "ports": [
+        8080
+      ]
     }
   ],
   "routing": {
@@ -391,8 +457,19 @@
         "host": "kali",
         "subnet": "attacker_lan",
         "gateway": "10.250.0.9"
+      },
+      {
+        "host": "c2",
+        "subnet": "relay_lan",
+        "gateway": "10.250.0.13"
+      },
+      {
+        "host": "webserver",
+        "subnet": "web_lan",
+        "gateway": "10.250.0.17"
       }
-    ]
+    ],
+    "isolate_management": true
   },
   "playbooks": [
     {

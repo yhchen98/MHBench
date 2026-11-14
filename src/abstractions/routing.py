@@ -100,6 +100,9 @@ class RoutingConfig(BaseModel):
     policies: list[RoutingPolicy] = Field(default_factory=list)
     host_gateways: list[HostGateway] = Field(default_factory=list)
     control_routes: list[IPv4Network] = Field(default_factory=list)
+    # Experimental control interfaces use DHCP and the management CIDR is removed from guests; the
+    # relay control prefix/gateway remains as the documented restoration exception.
+    isolate_management: bool = False
 
     def data_subnet_names(self, topology: NetworkTopology) -> set[str]:
         participants = {r.host for r in self.routers} | {g.host for g in self.host_gateways}

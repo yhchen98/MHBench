@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -53,6 +54,10 @@ class AnsibleRunner:
         self._attacker_play = getattr(config, "attacker_play", None)  # overrides the kali host's runtime play (per-attacker)
         self._attacker_only = getattr(config, "attacker_only", False)  # run ONLY the kali attacker host's play (post-config setup step)
         self._verbosity = getattr(config, "ansible_verbosity", 0)
+        # The Arena manager may be started without the MHBench virtualenv on PATH. ansible-runner
+        # resolves ansible-playbook from PATH, so make the project interpreter explicit.
+        venv_bin = str(_MHBENCH_DIR / ".venv" / "bin")
+        os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
 
     def _reset_stale_masters(self, ssh_ctl_dir: str) -> None:
         """Unlink every ControlPath socket under ssh_ctl_dir so the next attempt opens fresh
@@ -202,13 +207,7 @@ class AnsibleRunner:
         # socket keyed on the bastion IP + namespaced per-project (same dir as the outer per-target mux) so
         # concurrent runs — same internal IPs, different bastions — never share a socket.
         ctl = self._ssh_ctl_dir()
-        proxy = (
-            f"ssh -W %h:%p -i {self._ssh_key_path} "
-            f"-o BatchMode=yes -o PasswordAuthentication=no "  # fail fast if bastion key-auth fails -> no password-prompt hang
-            f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-            f"-o ControlMaster=auto -o ControlPath={ctl}/bastion-{mgmt_floating_ip} -o ControlPersist=300s "
-            f"root@{mgmt_floating_ip}"
-        )
+        proxy = self._bastion_proxy(topology, mgmt_floating_ip, ctl)
         inventory_hosts = {
             host.name: {
                 "ansible_host": str(host.ip_address),
@@ -331,6 +330,129 @@ class AnsibleRunner:
         """True for any Kali attacker image profile (the shared one or a dedicated one)."""
         return vm_type.startswith("kali")
 
+    _RELAY_KEY_NAMES = ("relay_admin", "guest_proxy", "c2_proxy", "mh_hop", "guest_admin")
+
+    def _issue_relay_keys(self) -> dict[str, Path]:
+        keydir = _MHBENCH_DIR / "keys"
+        keydir.mkdir(parents=True, exist_ok=True)
+        out: dict[str, Path] = {}
+        for name in self._RELAY_KEY_NAMES:
+            p = keydir / name
+            if not p.exists():
+                subprocess.run(["ssh-keygen", "-t", "ed25519", "-f", str(p), "-N", "", "-q",
+                                "-C", f"mhbench-{name}"], check=True)
+                p.chmod(0o600)
+            out[name] = p
+        return out
+
+    def _relay_key(self, name: str) -> Path:
+        return _MHBENCH_DIR / "keys" / name
+
+    def _run_bootstrap_ssh(self, topology: NetworkTopology, mgmt_ip: str, host_ip: str,
+                           command: str, *, input_text: str | None = None, direct: bool = False) -> subprocess.CompletedProcess:
+        argv = ["ssh", *self._ssh_base()]
+        if not direct:
+            proxy = self._bastion_proxy(topology, mgmt_ip, self._ssh_ctl_dir())
+            argv += ["-o", f"ProxyCommand={proxy}"]
+        argv += [f"root@{host_ip}", command]
+        return subprocess.run(argv, input=input_text, capture_output=True, text=True, timeout=120)
+
+    def _install_relay_access(self, topology: NetworkTopology, mgmt_floating_ip: str) -> None:
+        """Install relay admin/proxy accounts and keys, leaving the cloud key for the setup window."""
+        keys = self._issue_relay_keys()
+        infrastructure = [h for h in topology.get_all_hosts() if h.infrastructure and h.ip_address]
+        if not infrastructure:
+            return
+        c2_host = infrastructure[0]
+        c2_ip = str(c2_host.ip_address)
+        # Root keys: relay admin on c2; guest admin on every experimental guest.
+        for host in topology.get_all_hosts():
+            if host.infrastructure or not host.ip_address:
+                continue
+            self._inject_pubkey(Path(str(keys["guest_admin"]) + ".pub").read_text().strip(),
+                                str(host.ip_address), mgmt_floating_ip, topology)
+        self._inject_pubkey(Path(str(keys["relay_admin"]) + ".pub").read_text().strip(),
+                            c2_ip, mgmt_floating_ip, topology)
+        proxy_script = (_MHBENCH_DIR / "src/playbooks/plays/aux_files/ssh_proxy.py").read_text()
+        guest_allow = "\n".join(
+            f"{h.ip_address} 22" for h in topology.get_all_hosts()
+            if not h.infrastructure and h.ip_address) + "\n"
+        c2_allow = "127.0.0.1 8888\n"
+        mgmt_allow = f"{c2_ip} 22\n"
+
+        def pub(name: str) -> str:
+            return Path(str(keys[name]) + ".pub").read_text().strip()
+
+        def installs(host: str, accounts: list[tuple[str, str, str]]) -> None:
+            for user, key_name, allow_path in accounts:
+                pubkey = pub(key_name)
+                cmd = (
+                    f"id -u {user} >/dev/null 2>&1 || useradd -m -s /bin/bash {user}; "
+                    f"install -d -m700 -o {user} -g {user} /home/{user}/.ssh; "
+                    f"printf '%s\n' {shlex.quote(pubkey)} > /home/{user}/.ssh/authorized_keys; "
+                    f"chown -R {user}:{user} /home/{user}/.ssh; chmod 600 /home/{user}/.ssh/authorized_keys"
+                )
+                r = self._run_bootstrap_ssh(topology, mgmt_floating_ip, host, cmd,
+                                            direct=host == mgmt_floating_ip)
+                if r.returncode != 0:
+                    logger.warning("Relay account %s on %s failed: %s", user, host, r.stderr.strip())
+            # Shared exact proxy script.
+            r = self._run_bootstrap_ssh(
+                topology, mgmt_floating_ip, host,
+                "install -d -m755 /usr/local/sbin /etc/mhbench && cat > /usr/local/sbin/mhbench-ssh-proxy && chmod 0755 /usr/local/sbin/mhbench-ssh-proxy",
+                input_text=proxy_script, direct=host == mgmt_floating_ip)
+            if r.returncode != 0:
+                logger.warning("Relay proxy script on %s failed: %s", host, r.stderr.strip())
+
+        # c2 proxy accounts and exact allow files.
+        installs(c2_ip, [
+            ("relay-guest-proxy", "guest_proxy", "/etc/mhbench/guest-proxy.allow"),
+            ("relay-c2-proxy", "c2_proxy", "/etc/mhbench/c2-proxy.allow"),
+        ])
+        for path, content in (("/etc/mhbench/guest-proxy.allow", guest_allow),
+                              ("/etc/mhbench/c2-proxy.allow", c2_allow)):
+            self._run_bootstrap_ssh(topology, mgmt_floating_ip, c2_ip,
+                                    f"printf '%s' {shlex.quote(content)} > {path} && chmod 0644 {path}")
+        c2_sshd = """# BEGIN mhbench-relay-proxy
+Match User relay-guest-proxy
+  ForceCommand /usr/local/sbin/mhbench-ssh-proxy /etc/mhbench/guest-proxy.allow
+  AllowTcpForwarding no
+  PermitTTY no
+Match User relay-c2-proxy
+  ForceCommand /usr/local/sbin/mhbench-ssh-proxy /etc/mhbench/c2-proxy.allow
+  AllowTcpForwarding no
+  PermitTTY no
+Match all
+# END mhbench-relay-proxy
+"""
+        self._run_bootstrap_ssh(
+            topology, mgmt_floating_ip, c2_ip,
+            "cp -a /etc/ssh/sshd_config /etc/ssh/sshd_config.mhbench.bak 2>/dev/null || true; "
+            "sed -i '/# BEGIN mhbench-relay-proxy/,/# END mhbench-relay-proxy/d' /etc/ssh/sshd_config; "
+            "cat >> /etc/ssh/sshd_config && sshd -t && systemctl reload ssh",
+            input_text=c2_sshd)
+        # management outer jump.
+        installs(mgmt_floating_ip, [("mh-hop", "mh_hop", "/etc/mhbench/mh-hop.allow")])
+        self._run_bootstrap_ssh(
+            topology, mgmt_floating_ip, mgmt_floating_ip,
+            "printf '%s' " + shlex.quote(mgmt_allow) + " > /etc/mhbench/mh-hop.allow && chmod 0644 /etc/mhbench/mh-hop.allow",
+            direct=True)
+        mgmt_sshd = """# BEGIN mhbench-relay-proxy
+Match User mh-hop
+  ForceCommand /usr/local/sbin/mhbench-ssh-proxy /etc/mhbench/mh-hop.allow
+  AllowTcpForwarding no
+  PermitTTY no
+Match all
+# END mhbench-relay-proxy
+"""
+        self._run_bootstrap_ssh(
+            topology, mgmt_floating_ip, mgmt_floating_ip,
+            "cp -a /etc/ssh/sshd_config /etc/ssh/sshd_config.mhbench.bak 2>/dev/null || true; "
+            "sed -i '/# BEGIN mhbench-relay-proxy/,/# END mhbench-relay-proxy/d' /etc/ssh/sshd_config; "
+            "cat >> /etc/ssh/sshd_config && sshd -t && systemctl reload ssh",
+            input_text=mgmt_sshd, direct=True)
+        logger.info("Relay forced-proxy access installed on c2 and management host")
+
     def _issue_scoped_keys(self):
         keydir = _MHBENCH_DIR / "keys"
         keydir.mkdir(parents=True, exist_ok=True)
@@ -348,9 +470,61 @@ class AnsibleRunner:
         return ["-i", str(self._ssh_key_path), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
                 "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15"]
 
-    def _inject_pubkey(self, pubkey: str, host_ip: str, mgmt_ip: str) -> bool:
+    def _bastion_proxy(self, topology: NetworkTopology, mgmt_floating_ip: str, ctl: str,
+                       use_proxies: bool = False) -> str:
+        """ProxyCommand from the harness to a guest: management outer jump, then c2 when the topology
+        contains an infrastructure relay. The relay is the only experimental-guest management source
+        after the control plane is isolated; the management host remains the outer jump only."""
+        infrastructure = [h for h in topology.get_all_hosts()
+                          if h.infrastructure and h.ip_address]
+        if not infrastructure:
+            return (
+                f"ssh -W %h:%p -i {self._ssh_key_path} "
+                f"-o BatchMode=yes -o PasswordAuthentication=no "
+                f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+                f"-o ControlMaster=auto -o ControlPath={ctl}/bastion-{mgmt_floating_ip} -o ControlPersist=300s "
+                f"root@{mgmt_floating_ip}"
+            )
+        relay_ip = str(infrastructure[0].ip_address)
+        guest_proxy_key = self._relay_key("guest_proxy")
+        mh_hop_key = self._relay_key("mh_hop")
+        if use_proxies and guest_proxy_key.exists() and mh_hop_key.exists():
+            inner = (
+                f"ssh -i {mh_hop_key} -o BatchMode=yes -o PasswordAuthentication=no "
+                f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+                f"mh-hop@{mgmt_floating_ip} {relay_ip} 22"
+            )
+            return (
+                f"ssh -i {guest_proxy_key} -o BatchMode=yes -o PasswordAuthentication=no "
+                f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+                f"-o ProxyCommand='{inner}' "
+                f"relay-guest-proxy@{relay_ip} %h %p"
+            )
+        # Nested ProxyCommand: outer SSH terminates on the relay and forwards to the guest; its
+        # ProxyCommand reaches the relay through the management outer jump. This keeps the relay
+        # as the guest-management source while the management host is only the outer hop.
+        inner = (
+            f"ssh -W {relay_ip}:22 -i {self._ssh_key_path} "
+            f"-o BatchMode=yes -o PasswordAuthentication=no "
+            f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+            f"root@{mgmt_floating_ip}"
+        )
+        return (
+            f"ssh -W %h:%p -i {self._ssh_key_path} "
+            f"-o BatchMode=yes -o PasswordAuthentication=no "
+            f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+            f"-o ControlMaster=auto -o ControlPath={ctl}/bastion-{mgmt_floating_ip} -o ControlPersist=300s "
+            f"-o ProxyCommand='{inner}' "
+            f"root@{relay_ip}"
+        )
+
+    def _inject_pubkey(self, pubkey: str, host_ip: str, mgmt_ip: str,
+                       topology: NetworkTopology | None = None) -> bool:
         """Append pubkey to root's authorized_keys on host_ip, reached via the bastion. Idempotent."""
-        proxy = "ssh -W %h:%p " + " ".join(self._ssh_base()) + f" root@{mgmt_ip}"
+        if topology is not None and any(h.infrastructure for h in topology.get_all_hosts()):
+            proxy = self._bastion_proxy(topology, mgmt_ip, self._ssh_ctl_dir())
+        else:
+            proxy = "ssh -W %h:%p " + " ".join(self._ssh_base()) + f" root@{mgmt_ip}"
         remote = ("install -d -m700 ~/.ssh && touch ~/.ssh/authorized_keys && "
                   f"grep -qxF {pubkey!r} ~/.ssh/authorized_keys || echo {pubkey!r} >> ~/.ssh/authorized_keys")
         r = subprocess.run(["ssh", *self._ssh_base(), "-o", f"ProxyCommand={proxy}", f"root@{host_ip}", remote],
@@ -400,15 +574,16 @@ class AnsibleRunner:
             foothold_ip = attacker_hosts[0][1]
         try:
             if foothold_ip:
-                ok = self._inject_pubkey(ak_pub, foothold_ip, mgmt_floating_ip)
+                ok = self._inject_pubkey(ak_pub, foothold_ip, mgmt_floating_ip, topology)
                 logger.info("Scoped key: attacker_key -> foothold %s: %s", foothold_ip, "ok" if ok else "FAILED")
                 self._inject_bastion_jump(ak_pub, [f"{foothold_ip}:22"], mgmt_floating_ip)
             dtargets = ([box_ip] if box_ip else []) + victim_ips
             for ip in dtargets:
-                ok = self._inject_pubkey(dk_pub, ip, mgmt_floating_ip)
+                ok = self._inject_pubkey(dk_pub, ip, mgmt_floating_ip, topology)
                 logger.info("Scoped key: defender_key -> %s: %s", ip, "ok" if ok else "FAILED")
             if dtargets:
                 self._inject_bastion_jump(dk_pub, [f"{ip}:22" for ip in dtargets], mgmt_floating_ip)
+            self._install_relay_access(topology, mgmt_floating_ip)
         except Exception as e:  # noqa: BLE001
             logger.warning("Scoped-key injection errored (%s); continuing.", e)
 
@@ -427,13 +602,7 @@ class AnsibleRunner:
         # socket keyed on the bastion IP + namespaced per-project (same dir as the outer per-target mux) so
         # concurrent runs — same internal IPs, different bastions — never share a socket.
         ctl = self._ssh_ctl_dir()
-        proxy = (
-            f"ssh -W %h:%p -i {self._ssh_key_path} "
-            f"-o BatchMode=yes -o PasswordAuthentication=no "  # fail fast if bastion key-auth fails -> no password-prompt hang
-            f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-            f"-o ControlMaster=auto -o ControlPath={ctl}/bastion-{mgmt_floating_ip} -o ControlPersist=300s "
-            f"root@{mgmt_floating_ip}"
-        )
+        proxy = self._bastion_proxy(topology, mgmt_floating_ip, ctl)
         inventory_hosts = {
             host.name: {
                 "ansible_host": str(host.ip_address),
@@ -618,7 +787,7 @@ class AnsibleRunner:
         # sinking the rest. Runs before teardown deletes the VMs.
         logger.debug("Collecting host logs to %s via mgmt %s", dest, mgmt_floating_ip)
         # every host including the attacker (kali) — its image now bakes in the same telemetry
-        hosts = list(topology.get_all_hosts())
+        hosts = [h for h in topology.get_all_hosts() if not h.infrastructure]
         for host in hosts:
             if host.ip_address is None:
                 raise RuntimeError(f"Host '{host.name}' has no ip_address; cannot build ansible inventory.")
@@ -634,19 +803,15 @@ class AnsibleRunner:
         # socket keyed on the bastion IP + namespaced per-project (same dir as the outer per-target mux) so
         # concurrent runs — same internal IPs, different bastions — never share a socket.
         ctl = self._ssh_ctl_dir()
-        proxy = (
-            f"ssh -W %h:%p -i {self._ssh_key_path} "
-            f"-o BatchMode=yes -o PasswordAuthentication=no "  # fail fast if bastion key-auth fails -> no password-prompt hang
-            f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-            f"-o ControlMaster=auto -o ControlPath={ctl}/bastion-{mgmt_floating_ip} -o ControlPersist=300s "
-            f"root@{mgmt_floating_ip}"
-        )
+        proxy = self._bastion_proxy(topology, mgmt_floating_ip, ctl, use_proxies=True)
+        guest_admin = self._relay_key("guest_admin")
+        target_key = str(guest_admin) if guest_admin.exists() and topology.routing and topology.routing.isolate_management else str(self._ssh_key_path)
         inventory_hosts = {
             host.name: {
                 "ansible_host": str(host.ip_address),
                 "ansible_port": 22,
                 "ansible_user": "root",
-                "ansible_ssh_private_key_file": self._ssh_key_path,
+                "ansible_ssh_private_key_file": target_key,
                 "ansible_ssh_common_args": (
                     f'-o StrictHostKeyChecking=no '
                     f'-o UserKnownHostsFile=/dev/null '
@@ -698,13 +863,7 @@ class AnsibleRunner:
         # socket keyed on the bastion IP + namespaced per-project (same dir as the outer per-target mux) so
         # concurrent runs — same internal IPs, different bastions — never share a socket.
         ctl = self._ssh_ctl_dir()
-        proxy = (
-            f"ssh -W %h:%p -i {self._ssh_key_path} "
-            f"-o BatchMode=yes -o PasswordAuthentication=no "  # fail fast if bastion key-auth fails -> no password-prompt hang
-            f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-            f"-o ControlMaster=auto -o ControlPath={ctl}/bastion-{mgmt_floating_ip} -o ControlPersist=300s "
-            f"root@{mgmt_floating_ip}"
-        )
+        proxy = self._bastion_proxy(topology, mgmt_floating_ip, ctl)
         inventory_hosts = {
             host.name: {
                 "ansible_host": str(host.ip_address),

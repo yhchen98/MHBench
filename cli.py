@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -326,6 +327,43 @@ def teardown(ctx: click.Context, spec: Path, yes: bool, project_name: str | None
     click.echo(f"Tearing down topology '{topology.name}'...")
     orchestrator.teardown(topology)
     click.echo("Teardown complete.")
+
+
+# ---------------------------------------------------------------------------
+# seal / restore  (ephemeral experimental control plane)
+# ---------------------------------------------------------------------------
+
+def _routed_orchestrator(config, topology, project_name):
+    online = OnlineRegistryService(config)
+    playbook_registry = PlaybookRegistryService(config)
+    backend = build_backend(config, online, project_name=project_name)
+    return DeploymentOrchestrator(backend, config, online, playbook_registry, project_name=project_name)
+
+
+@cli.command()
+@click.argument("spec", type=click.Path(exists=True, path_type=Path))
+@click.option("--project-name", default=None, help="Prefix used during provisioning")
+@click.pass_context
+def seal(ctx: click.Context, spec: Path, project_name: str | None) -> None:
+    """Detach the experimental control ports for an isolated BGP run."""
+    config = _load_config(ctx.obj["config_path"], ctx.obj["ansible_verbosity"])
+    topology = JsonSpecParser().parse(spec)
+    _require_backend_config(config, topology)
+    report = _routed_orchestrator(config, topology, project_name).seal_control_plane(topology)
+    click.echo(json.dumps(report, sort_keys=True))
+
+
+@cli.command()
+@click.argument("spec", type=click.Path(exists=True, path_type=Path))
+@click.option("--project-name", default=None, help="Prefix used during provisioning")
+@click.pass_context
+def restore(ctx: click.Context, spec: Path, project_name: str | None) -> None:
+    """Reattach control ports detached by seal."""
+    config = _load_config(ctx.obj["config_path"], ctx.obj["ansible_verbosity"])
+    topology = JsonSpecParser().parse(spec)
+    _require_backend_config(config, topology)
+    report = _routed_orchestrator(config, topology, project_name).restore_control_plane(topology)
+    click.echo(json.dumps(report, sort_keys=True))
 
 
 # ---------------------------------------------------------------------------

@@ -62,6 +62,9 @@ class Host(BaseModel):
     flavor: str = "m1.small"
     ip_address: IPv4Address | None = None
     extra_interfaces: list[HostInterface] = Field(default_factory=list)
+    # Infrastructure control-plane host (for example the C2 relay): excluded from experimental sealing,
+    # attacker-scoped keys, and the attacker-facing inventory.
+    infrastructure: bool = False
 
 
 class Subnet(BaseModel):
