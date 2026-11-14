@@ -52,6 +52,7 @@ def compile_image(base_image: Path, playbooks: list[Path], output_path: Path, di
         subprocess.run(
             ["virt-customize", "-a", str(tmp),
              "--ssh-inject", f"root:string:{pub_key}",
+            "--run-command", "systemctl enable ssh",
              "--run-command",
              "printf 'PermitRootLogin prohibit-password\\n' > /etc/ssh/sshd_config.d/00-compile.conf"],
             check=True, capture_output=True,
@@ -89,7 +90,7 @@ runcmd:
             ["qemu-system-x86_64", *kvm, "-m", "4096", "-smp", "4",
              "-drive", f"file={tmp},format=qcow2,if=virtio",
              "-drive", f"file={workdir / 'seed.iso'},format=raw,if=virtio",
-             "-netdev", f"user,id=net0,hostfwd=tcp::{ssh_port}-:22",
+             "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22",
              "-device", "virtio-net-pci,netdev=net0",
              "-display", "none"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

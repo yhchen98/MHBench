@@ -46,7 +46,7 @@ class HostDeployer:
     def __init__(self, conn: Connection, config: Config, online_registry: OnlineRegistryService, project_name: str | None = None) -> None:
         self._conn = conn
         self._config = config
-        self._external_network = config.openstack.external_network or "external"
+        self._external_network = config.openstack.external_network or "public"
         self._project_id = conn.current_project_id
         self._ssh_key_name = config.openstack.keypair_name
         self._management = config.management

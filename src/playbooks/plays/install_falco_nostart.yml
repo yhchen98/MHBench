@@ -49,6 +49,7 @@
       name: "{{ 'falco=' + falco_version if falco_version else 'falco' }}"
       state: present
       update_cache: yes
+      dpkg_options: "force-confdef,force-confold,force-overwrite"
 
   - name: Create Falco configuration from template
     copy:

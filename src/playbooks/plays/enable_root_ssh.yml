@@ -2,6 +2,12 @@
   become: true
 
   tasks:
+    - name: Install cloud-init
+      ansible.builtin.apt:
+        name: cloud-init
+        state: present
+        update_cache: true
+
     - name: Enable root login in cloud-init config
       ansible.builtin.lineinfile:
         path: /etc/cloud/cloud.cfg
