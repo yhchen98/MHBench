@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Legitimate client: fetch the login form and submit credentials on a fixed schedule."""
+import http.cookiejar
 import json
 import re
 import syslog
@@ -20,6 +21,8 @@ with open(CONFIG_PATH, encoding="utf-8") as handle:
 PORTAL = CONFIG["portal"].rstrip("/")
 USERNAME = CONFIG["username"]
 PASSWORD = CONFIG["password"]
+OPENER = urllib.request.build_opener(
+    urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
 FORM_RE = re.compile(r"<form\b[^>]*\baction=[\"']([^\"']*)[\"'][^>]*>", re.I)
 INPUT_RE = re.compile(r"<input\b[^>]*>", re.I)
@@ -28,7 +31,7 @@ NAME_RE = re.compile(r"\bname=[\"']([^\"']+)[\"']", re.I)
 
 def fetch(url):
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=10) as response:
+    with OPENER.open(request, timeout=10) as response:
         return response.status, response.read().decode("utf-8", "replace")
 
 
@@ -43,7 +46,7 @@ def submit(form_action, html):
     data = urllib.parse.urlencode(fields).encode("utf-8")
     request = urllib.request.Request(
         url, data=data, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=10) as response:
+    with OPENER.open(request, timeout=10) as response:
         response.read()
         return response.status
 
