@@ -343,13 +343,17 @@ def _routed_orchestrator(config, topology, project_name):
 @cli.command()
 @click.argument("spec", type=click.Path(exists=True, path_type=Path))
 @click.option("--project-name", default=None, help="Prefix used during provisioning")
+@click.option("--mgmt-ip", default=None, help="Management host floating IP used for the scrub")
 @click.pass_context
-def seal(ctx: click.Context, spec: Path, project_name: str | None) -> None:
-    """Detach the experimental control ports for an isolated BGP run."""
+def seal(ctx: click.Context, spec: Path, project_name: str | None, mgmt_ip: str | None) -> None:
+    """Scrub, harden, and detach the experimental control ports for an isolated BGP run."""
     config = _load_config(ctx.obj["config_path"], ctx.obj["ansible_verbosity"])
     topology = JsonSpecParser().parse(spec)
     _require_backend_config(config, topology)
-    report = _routed_orchestrator(config, topology, project_name).seal_control_plane(topology)
+    orchestrator = _routed_orchestrator(config, topology, project_name)
+    orchestrator.scrub(topology, mgmt_ip)
+    orchestrator.scrub_relay(topology, mgmt_ip)
+    report = orchestrator.seal_control_plane(topology)
     click.echo(json.dumps(report, sort_keys=True))
 
 

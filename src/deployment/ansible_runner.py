@@ -847,6 +847,87 @@ Match all
         logger.warning("collect_host_logs: %d host(s) returned no logs after %d attempts (proceeding best-effort): %s",
                        len(pending), _COLLECT_RETRIES, sorted(pending))
 
+    def _forced_inventory(self, topology: NetworkTopology, mgmt_floating_ip: str,
+                          include_infrastructure: bool = False) -> dict:
+        ctl = self._ssh_ctl_dir()
+        proxy = self._bastion_proxy(topology, mgmt_floating_ip, ctl, use_proxies=True)
+        guest_admin = self._relay_key("guest_admin")
+        target_key = str(guest_admin) if guest_admin.exists() else str(self._ssh_key_path)
+        return {
+            host.name: {
+                "ansible_host": str(host.ip_address),
+                "ansible_port": 22,
+                "ansible_user": "root",
+                "ansible_ssh_private_key_file": target_key,
+                "ansible_ssh_common_args": (
+                    f'-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '
+                    f'-o ServerAliveInterval=30 -o ServerAliveCountMax=10 '
+                    f'-o ProxyCommand="{proxy}"'
+                ),
+            }
+            for host in topology.get_all_hosts()
+            if host.ip_address and (include_infrastructure or not host.infrastructure)
+        }
+
+    def scrub(self, topology: NetworkTopology, mgmt_floating_ip: str) -> None:
+        """Remove known management exposure from experimental guests before sealing."""
+        inventory = self._forced_inventory(topology, mgmt_floating_ip)
+        management_key = Path(str(self._ssh_key_path) + ".pub").read_text().strip()
+        pb_path = self._playbook_registry.get_path("scrub_guest")
+        project_dir = str((_MHBENCH_DIR / pb_path).resolve().parent)
+        with tempfile.TemporaryDirectory() as tmp:
+            self._run_playbook(
+                "scrub_guest", {"all": {"hosts": inventory}},
+                {"management_key_pub": management_key,
+                 "management_ips": ["10.0.1.10", mgmt_floating_ip]},
+                tmp, project_dir)
+
+    def scrub_relay(self, topology: NetworkTopology, mgmt_floating_ip: str) -> None:
+        """Remove the relay's cloud key and disable SSH forwarding globally after setup."""
+        infrastructure = [h for h in topology.get_all_hosts() if h.infrastructure and h.ip_address]
+        if not infrastructure:
+            return
+        c2_ip = str(infrastructure[0].ip_address)
+        cloud_pub = Path(str(self._ssh_key_path) + ".pub").read_text().strip().split()
+        keymat = cloud_pub[1] if len(cloud_pub) > 1 else ""
+        command = (
+            "if [ -n " + shlex.quote(keymat) + " ]; then "
+            "sed -i " + shlex.quote("\\|" + keymat + "|d") + " /root/.ssh/authorized_keys; fi; "
+            "grep -q '^AllowTcpForwarding' /etc/ssh/sshd_config && "
+            "sed -i 's/^AllowTcpForwarding.*/AllowTcpForwarding no/' /etc/ssh/sshd_config || "
+            "sed -i '1i AllowTcpForwarding no' /etc/ssh/sshd_config; "
+            "grep -q '^PermitTunnel' /etc/ssh/sshd_config && "
+            "sed -i 's/^PermitTunnel.*/PermitTunnel no/' /etc/ssh/sshd_config || "
+            "sed -i '1i PermitTunnel no' /etc/ssh/sshd_config; "
+            "sshd -t && systemctl reload ssh"
+        )
+        admin_key = self._relay_key("relay_admin")
+        mh_hop_key = self._relay_key("mh_hop")
+        if admin_key.exists() and mh_hop_key.exists():
+            proxy = (f"ssh -i {mh_hop_key} -o BatchMode=yes -o StrictHostKeyChecking=no "
+                     f"-o UserKnownHostsFile=/dev/null mh-hop@{mgmt_floating_ip} {c2_ip} 22")
+            r = subprocess.run(
+                ["ssh", "-i", str(admin_key), "-o", "BatchMode=yes",
+                 "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+                 "-o", f"ProxyCommand={proxy}", f"root@{c2_ip}", command],
+                capture_output=True, text=True, timeout=120)
+        else:
+            r = self._run_bootstrap_ssh(topology, mgmt_floating_ip, c2_ip, command)
+        if r.returncode != 0:
+            raise RuntimeError(f"relay hardening failed: {r.stderr.strip()}")
+        # The management outer jump is also forwarding-disabled after setup; mh-hop remains the
+        # only management-to-relay path, and it is a forced proxy rather than SSH forwarding.
+        command_mgmt = (
+            "grep -q '^AllowTcpForwarding' /etc/ssh/sshd_config && "
+            "sed -i 's/^AllowTcpForwarding.*/AllowTcpForwarding no/' /etc/ssh/sshd_config || "
+            "sed -i '1i AllowTcpForwarding no' /etc/ssh/sshd_config; "
+            "sshd -t && systemctl reload ssh"
+        )
+        r = self._run_bootstrap_ssh(topology, mgmt_floating_ip, mgmt_floating_ip,
+                                    command_mgmt, direct=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"management SSH hardening failed: {r.stderr.strip()}")
+
     def rotate_logs(self, topology: NetworkTopology, mgmt_floating_ip: str) -> None:
         # Pre-attack reset: rebuild the same bastion ProxyJump inventory as collect() and reset every
         # host's ground-truth logs to empty at the deploy->attack boundary, so post-experiment
