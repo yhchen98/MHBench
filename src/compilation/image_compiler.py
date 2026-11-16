@@ -25,7 +25,8 @@ rm -f /var/lib/dbus/machine-id 2>/dev/null || true
 truncate -s 0 /var/log/auth.log /var/log/syslog /var/log/audit/audit.log 2>/dev/null || true
 rm -f /var/log/cmdlog/* /var/log/netflow/* /root/.bash_history /home/*/.bash_history 2>/dev/null || true
 rm -f /root/.ssh/authorized_keys /etc/ssh/sshd_config.d/00-compile.conf 2>/dev/null || true
-shutdown -h now
+setsid sh -c 'sleep 1; shutdown -h now' >/dev/null 2>&1 < /dev/null &
+echo CLEANUP_SCHEDULED
 """
 
 
@@ -152,17 +153,19 @@ runcmd:
                 )
 
         # Clean up VM internals and shut down
-        subprocess.run(
+        cleanup = subprocess.run(
             ["ssh", *_SSH_OPTS.split(), "-i", str(workdir / "key"),
              "-p", str(ssh_port), "root@127.0.0.1", _CLEANUP_AND_SHUTDOWN],
-            capture_output=True,
+            capture_output=True, text=True,
         )
+        if cleanup.returncode != 0:
+            raise RuntimeError(
+                f"VM cleanup failed (exit {cleanup.returncode}); refusing to produce an image: "
+                f"{cleanup.stderr.strip()}")
         try:
             proc.wait(timeout=60)
-        except subprocess.TimeoutExpired:
-            logger.warning("VM did not shut down cleanly — force-killing.")
-            proc.kill()
-            proc.wait()
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("VM did not shut down after cleanup; refusing to produce an image") from exc
 
     except Exception:
         if proc:

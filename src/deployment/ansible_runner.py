@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import shlex
@@ -369,10 +370,12 @@ class AnsibleRunner:
         for host in topology.get_all_hosts():
             if host.infrastructure or not host.ip_address:
                 continue
-            self._inject_pubkey(Path(str(keys["guest_admin"]) + ".pub").read_text().strip(),
-                                str(host.ip_address), mgmt_floating_ip, topology)
-        self._inject_pubkey(Path(str(keys["relay_admin"]) + ".pub").read_text().strip(),
-                            c2_ip, mgmt_floating_ip, topology)
+            if not self._inject_pubkey(Path(str(keys["guest_admin"]) + ".pub").read_text().strip(),
+                                       str(host.ip_address), mgmt_floating_ip, topology):
+                raise RuntimeError(f"Guest-admin key injection failed for {host.name}.")
+        if not self._inject_pubkey(Path(str(keys["relay_admin"]) + ".pub").read_text().strip(),
+                                   c2_ip, mgmt_floating_ip, topology):
+            raise RuntimeError("Relay-admin key injection failed.")
         proxy_script = (_MHBENCH_DIR / "src/playbooks/plays/aux_files/ssh_proxy.py").read_text()
         guest_allow = "\n".join(
             f"{h.ip_address} 22" for h in topology.get_all_hosts()
@@ -395,14 +398,14 @@ class AnsibleRunner:
                 r = self._run_bootstrap_ssh(topology, mgmt_floating_ip, host, cmd,
                                             direct=host == mgmt_floating_ip)
                 if r.returncode != 0:
-                    logger.warning("Relay account %s on %s failed: %s", user, host, r.stderr.strip())
+                    raise RuntimeError(f"Relay account {user} on {host} failed: {r.stderr.strip()}")
             # Shared exact proxy script.
             r = self._run_bootstrap_ssh(
                 topology, mgmt_floating_ip, host,
                 "install -d -m755 /usr/local/sbin /etc/mhbench && cat > /usr/local/sbin/mhbench-ssh-proxy && chmod 0755 /usr/local/sbin/mhbench-ssh-proxy",
                 input_text=proxy_script, direct=host == mgmt_floating_ip)
             if r.returncode != 0:
-                logger.warning("Relay proxy script on %s failed: %s", host, r.stderr.strip())
+                raise RuntimeError(f"Relay proxy script on {host} failed: {r.stderr.strip()}")
 
         # c2 proxy accounts and exact allow files.
         installs(c2_ip, [
@@ -411,8 +414,10 @@ class AnsibleRunner:
         ])
         for path, content in (("/etc/mhbench/guest-proxy.allow", guest_allow),
                               ("/etc/mhbench/c2-proxy.allow", c2_allow)):
-            self._run_bootstrap_ssh(topology, mgmt_floating_ip, c2_ip,
-                                    f"printf '%s' {shlex.quote(content)} > {path} && chmod 0644 {path}")
+            r = self._run_bootstrap_ssh(topology, mgmt_floating_ip, c2_ip,
+                                        f"printf '%s' {shlex.quote(content)} > {path} && chmod 0644 {path}")
+            if r.returncode != 0:
+                raise RuntimeError(f"Relay allow-list {path} failed: {r.stderr.strip()}")
         c2_sshd = """# BEGIN mhbench-relay-proxy
 Match User relay-guest-proxy
   ForceCommand /usr/local/sbin/mhbench-ssh-proxy /etc/mhbench/guest-proxy.allow
@@ -425,18 +430,22 @@ Match User relay-c2-proxy
 Match all
 # END mhbench-relay-proxy
 """
-        self._run_bootstrap_ssh(
+        r = self._run_bootstrap_ssh(
             topology, mgmt_floating_ip, c2_ip,
             "cp -a /etc/ssh/sshd_config /etc/ssh/sshd_config.mhbench.bak 2>/dev/null || true; "
             "sed -i '/# BEGIN mhbench-relay-proxy/,/# END mhbench-relay-proxy/d' /etc/ssh/sshd_config; "
             "cat >> /etc/ssh/sshd_config && sshd -t && systemctl reload ssh",
             input_text=c2_sshd)
+        if r.returncode != 0:
+            raise RuntimeError(f"Relay sshd proxy config failed: {r.stderr.strip()}")
         # management outer jump.
         installs(mgmt_floating_ip, [("mh-hop", "mh_hop", "/etc/mhbench/mh-hop.allow")])
-        self._run_bootstrap_ssh(
+        r = self._run_bootstrap_ssh(
             topology, mgmt_floating_ip, mgmt_floating_ip,
             "printf '%s' " + shlex.quote(mgmt_allow) + " > /etc/mhbench/mh-hop.allow && chmod 0644 /etc/mhbench/mh-hop.allow",
             direct=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"Management hop allow-list failed: {r.stderr.strip()}")
         mgmt_sshd = """# BEGIN mhbench-relay-proxy
 Match User mh-hop
   ForceCommand /usr/local/sbin/mhbench-ssh-proxy /etc/mhbench/mh-hop.allow
@@ -445,12 +454,14 @@ Match User mh-hop
 Match all
 # END mhbench-relay-proxy
 """
-        self._run_bootstrap_ssh(
+        r = self._run_bootstrap_ssh(
             topology, mgmt_floating_ip, mgmt_floating_ip,
             "cp -a /etc/ssh/sshd_config /etc/ssh/sshd_config.mhbench.bak 2>/dev/null || true; "
             "sed -i '/# BEGIN mhbench-relay-proxy/,/# END mhbench-relay-proxy/d' /etc/ssh/sshd_config; "
             "cat >> /etc/ssh/sshd_config && sshd -t && systemctl reload ssh",
             input_text=mgmt_sshd, direct=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"Management sshd proxy config failed: {r.stderr.strip()}")
         logger.info("Relay forced-proxy access installed on c2 and management host")
 
     def _issue_scoped_keys(self):
@@ -488,7 +499,12 @@ Match all
         relay_ip = str(infrastructure[0].ip_address)
         guest_proxy_key = self._relay_key("guest_proxy")
         mh_hop_key = self._relay_key("mh_hop")
-        if use_proxies and guest_proxy_key.exists() and mh_hop_key.exists():
+        if use_proxies:
+            # The forced-proxy path is the isolation boundary. Do not fall back to root -W with the
+            # cloud key: a missing proxy credential must fail the seal/collection, not silently
+            # re-open a management path.
+            if not guest_proxy_key.exists() or not mh_hop_key.exists():
+                raise RuntimeError("Forced relay proxy credentials are missing for an isolated topology.")
             inner = (
                 f"ssh -i {mh_hop_key} -o BatchMode=yes -o PasswordAuthentication=no "
                 f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
@@ -548,11 +564,14 @@ Match all
         return r.returncode == 0
 
     def _inject_scoped_keys(self, topology: NetworkTopology, mgmt_floating_ip: str) -> None:
+        isolated = bool(topology.routing is not None and topology.routing.isolate_management)
         try:
             ak, dk = self._issue_scoped_keys()
             ak_pub = Path(str(ak) + ".pub").read_text().strip()
             dk_pub = Path(str(dk) + ".pub").read_text().strip()
-        except Exception as e:  # noqa: BLE001 — best-effort; never fail configure
+        except Exception as e:  # noqa: BLE001
+            if isolated:
+                raise RuntimeError(f"Scoped-key generation failed for an isolated topology: {e}") from e
             logger.warning("Scoped-key generation failed (%s); skipping injection.", e)
             return
         attacker_hosts: list[tuple[bool, str]] = []
@@ -575,16 +594,23 @@ Match all
         try:
             if foothold_ip:
                 ok = self._inject_pubkey(ak_pub, foothold_ip, mgmt_floating_ip, topology)
+                if not ok and isolated:
+                    raise RuntimeError(f"Attacker key injection failed on foothold {foothold_ip}.")
                 logger.info("Scoped key: attacker_key -> foothold %s: %s", foothold_ip, "ok" if ok else "FAILED")
-                self._inject_bastion_jump(ak_pub, [f"{foothold_ip}:22"], mgmt_floating_ip)
+                if not self._inject_bastion_jump(ak_pub, [f"{foothold_ip}:22"], mgmt_floating_ip) and isolated:
+                    raise RuntimeError("Attacker-key management jump injection failed.")
             dtargets = ([box_ip] if box_ip else []) + victim_ips
             for ip in dtargets:
                 ok = self._inject_pubkey(dk_pub, ip, mgmt_floating_ip, topology)
+                if not ok and isolated:
+                    raise RuntimeError(f"Defender key injection failed on {ip}.")
                 logger.info("Scoped key: defender_key -> %s: %s", ip, "ok" if ok else "FAILED")
-            if dtargets:
-                self._inject_bastion_jump(dk_pub, [f"{ip}:22" for ip in dtargets], mgmt_floating_ip)
+            if dtargets and not self._inject_bastion_jump(dk_pub, [f"{ip}:22" for ip in dtargets], mgmt_floating_ip) and isolated:
+                raise RuntimeError("Defender-key management jump injection failed.")
             self._install_relay_access(topology, mgmt_floating_ip)
         except Exception as e:  # noqa: BLE001
+            if isolated:
+                raise
             logger.warning("Scoped-key injection errored (%s); continuing.", e)
 
     def run_parallel(self, topology: NetworkTopology, mgmt_floating_ip: str) -> None:
@@ -805,7 +831,10 @@ Match all
         ctl = self._ssh_ctl_dir()
         proxy = self._bastion_proxy(topology, mgmt_floating_ip, ctl, use_proxies=True)
         guest_admin = self._relay_key("guest_admin")
-        target_key = str(guest_admin) if guest_admin.exists() and topology.routing and topology.routing.isolate_management else str(self._ssh_key_path)
+        isolated = bool(topology.routing is not None and topology.routing.isolate_management)
+        if isolated and not guest_admin.exists():
+            raise RuntimeError("Guest-admin key is missing for an isolated topology.")
+        target_key = str(guest_admin) if isolated else str(self._ssh_key_path)
         inventory_hosts = {
             host.name: {
                 "ansible_host": str(host.ip_address),
@@ -852,7 +881,9 @@ Match all
         ctl = self._ssh_ctl_dir()
         proxy = self._bastion_proxy(topology, mgmt_floating_ip, ctl, use_proxies=True)
         guest_admin = self._relay_key("guest_admin")
-        target_key = str(guest_admin) if guest_admin.exists() else str(self._ssh_key_path)
+        if not guest_admin.exists():
+            raise RuntimeError("Guest-admin key is missing for forced guest access.")
+        target_key = str(guest_admin)
         return {
             host.name: {
                 "ansible_host": str(host.ip_address),
@@ -869,6 +900,59 @@ Match all
             if host.ip_address and (include_infrastructure or not host.infrastructure)
         }
 
+    def verify_restoration(self, topology: NetworkTopology, mgmt_floating_ip: str) -> dict:
+        """Verify real post-restore DHCP/SSH/routing/Ansible reachability, not just port state."""
+        if topology.routing is None or not topology.routing.isolate_management:
+            return {}
+        infrastructure = [h for h in topology.get_all_hosts() if h.infrastructure and h.ip_address]
+        if not infrastructure:
+            return {}
+        guest_admin = self._relay_key("guest_admin")
+        if not guest_admin.exists():
+            raise RuntimeError("Guest-admin key is missing; cannot verify restoration.")
+        proxy = self._bastion_proxy(topology, mgmt_floating_ip, self._ssh_ctl_dir(), use_proxies=True)
+        routers = {r.host for r in topology.routing.routers}
+        verified = []
+        for host in topology.get_all_hosts():
+            if host.infrastructure or not host.ip_address:
+                continue
+            prefix = topology.get_subnet_for_host(host).cidr.prefixlen
+            expected_address = f"{host.ip_address}/{prefix}"
+            command = "hostname; ip -4 -o addr show; ip -4 route show; ip -4 rule show"
+            r = subprocess.run(
+                ["ssh", "-i", str(guest_admin), "-o", "BatchMode=yes",
+                 "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+                 "-o", f"ProxyCommand={proxy}", f"root@{host.ip_address}", command],
+                capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                raise RuntimeError(f"restoration: SSH failed for {host.name}: {r.stderr.strip()}")
+            output = r.stdout
+            if expected_address not in output:
+                raise RuntimeError(f"restoration: {host.name} did not reacquire {expected_address}.")
+            if "10.0.1." in output:
+                raise RuntimeError(f"restoration: {host.name} still has a management reference.")
+            defaults = [line for line in output.splitlines() if line.startswith("default ")]
+            expected_defaults = 0 if host.name in routers else 1
+            if len(defaults) != expected_defaults:
+                raise RuntimeError(
+                    f"restoration: {host.name} has {len(defaults)} default route(s), expected {expected_defaults}.")
+            verified.append(host.name)
+        ansible = _MHBENCH_DIR / ".venv" / "bin" / "ansible"
+        if not ansible.exists():
+            raise RuntimeError("ansible CLI is missing; cannot verify Ansible restoration.")
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            json.dump(self._forced_inventory(topology, mgmt_floating_ip), handle)
+            inventory_path = handle.name
+        try:
+            r = subprocess.run(
+                [str(ansible), "-i", inventory_path, "all", "-m", "ping", "-o", "-f", "8"],
+                capture_output=True, text=True, timeout=180)
+        finally:
+            Path(inventory_path).unlink(missing_ok=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"restoration: Ansible ping failed: {r.stderr.strip() or r.stdout[-500:]}")
+        return {"verified": verified, "ansible": "ok"}
+
     def scrub(self, topology: NetworkTopology, mgmt_floating_ip: str) -> None:
         """Remove known management exposure from experimental guests before sealing."""
         inventory = self._forced_inventory(topology, mgmt_floating_ip)
@@ -883,48 +967,62 @@ Match all
                 tmp, project_dir)
 
     def scrub_relay(self, topology: NetworkTopology, mgmt_floating_ip: str) -> None:
-        """Remove the relay's cloud key and disable SSH forwarding globally after setup."""
+        """Remove the relay's cloud key and restrict SSH to the control interface after setup."""
         infrastructure = [h for h in topology.get_all_hosts() if h.infrastructure and h.ip_address]
         if not infrastructure:
             return
         c2_ip = str(infrastructure[0].ip_address)
-        cloud_pub = Path(str(self._ssh_key_path) + ".pub").read_text().strip().split()
-        keymat = cloud_pub[1] if len(cloud_pub) > 1 else ""
-        command = (
-            "if [ -n " + shlex.quote(keymat) + " ]; then "
-            "sed -i " + shlex.quote("\\|" + keymat + "|d") + " /root/.ssh/authorized_keys; fi; "
-            "grep -q '^AllowTcpForwarding' /etc/ssh/sshd_config && "
-            "sed -i 's/^AllowTcpForwarding.*/AllowTcpForwarding no/' /etc/ssh/sshd_config || "
-            "sed -i '1i AllowTcpForwarding no' /etc/ssh/sshd_config; "
-            "grep -q '^PermitTunnel' /etc/ssh/sshd_config && "
-            "sed -i 's/^PermitTunnel.*/PermitTunnel no/' /etc/ssh/sshd_config || "
-            "sed -i '1i PermitTunnel no' /etc/ssh/sshd_config; "
-            "sshd -t && systemctl reload ssh"
-        )
         admin_key = self._relay_key("relay_admin")
         mh_hop_key = self._relay_key("mh_hop")
-        if admin_key.exists() and mh_hop_key.exists():
-            proxy = (f"ssh -i {mh_hop_key} -o BatchMode=yes -o StrictHostKeyChecking=no "
-                     f"-o UserKnownHostsFile=/dev/null mh-hop@{mgmt_floating_ip} {c2_ip} 22")
-            r = subprocess.run(
-                ["ssh", "-i", str(admin_key), "-o", "BatchMode=yes",
-                 "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-                 "-o", f"ProxyCommand={proxy}", f"root@{c2_ip}", command],
-                capture_output=True, text=True, timeout=120)
-        else:
-            r = self._run_bootstrap_ssh(topology, mgmt_floating_ip, c2_ip, command)
+        if not admin_key.exists() or not mh_hop_key.exists():
+            raise RuntimeError("Relay admin/mh-hop keys are missing; refusing to seal without forced relay access.")
+        cloud_pub = Path(str(self._ssh_key_path) + ".pub").read_text().strip().split()
+        keymat = cloud_pub[1] if len(cloud_pub) > 1 else ""
+
+        def hardening_command(listen_ip: str, remove_cloud_key: bool) -> str:
+            directives = [
+                f"ListenAddress {listen_ip}",
+                "PasswordAuthentication no",
+                "KbdInteractiveAuthentication no",
+                "AllowAgentForwarding no",
+                "X11Forwarding no",
+                "GatewayPorts no",
+                "PermitTunnel no",
+                "AllowTcpForwarding no",
+                "PermitRootLogin prohibit-password",
+            ]
+            remove = (
+                "if [ -n " + shlex.quote(keymat) + " ]; then "
+                "sed -i " + shlex.quote("\\|" + keymat + "|d") + " /root/.ssh/authorized_keys; fi; "
+                if remove_cloud_key else ""
+            )
+            return (
+                "cp -a /etc/ssh/sshd_config /etc/ssh/sshd_config.mhbench.sealed 2>/dev/null || true; "
+                "for key in ListenAddress PasswordAuthentication KbdInteractiveAuthentication "
+                "AllowAgentForwarding X11Forwarding GatewayPorts PermitTunnel AllowTcpForwarding "
+                "PermitRootLogin; do sed -i \"/^${key}[[:space:]]/d\" /etc/ssh/sshd_config; done; "
+                + remove +
+                "{ printf '%s\\n' " + " ".join(shlex.quote(x) for x in directives) +
+                "; cat /etc/ssh/sshd_config; } > /etc/ssh/sshd_config.mhbench.new && "
+                "mv /etc/ssh/sshd_config.mhbench.new /etc/ssh/sshd_config && "
+                "sshd -t && systemctl reload ssh"
+            )
+
+        proxy = (f"ssh -i {mh_hop_key} -o BatchMode=yes -o StrictHostKeyChecking=no "
+                 f"-o UserKnownHostsFile=/dev/null mh-hop@{mgmt_floating_ip} {c2_ip} 22")
+        r = subprocess.run(
+            ["ssh", "-i", str(admin_key), "-o", "BatchMode=yes",
+             "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+             "-o", f"ProxyCommand={proxy}", f"root@{c2_ip}",
+             hardening_command(c2_ip, True)],
+            capture_output=True, text=True, timeout=120)
         if r.returncode != 0:
             raise RuntimeError(f"relay hardening failed: {r.stderr.strip()}")
-        # The management outer jump is also forwarding-disabled after setup; mh-hop remains the
-        # only management-to-relay path, and it is a forced proxy rather than SSH forwarding.
-        command_mgmt = (
-            "grep -q '^AllowTcpForwarding' /etc/ssh/sshd_config && "
-            "sed -i 's/^AllowTcpForwarding.*/AllowTcpForwarding no/' /etc/ssh/sshd_config || "
-            "sed -i '1i AllowTcpForwarding no' /etc/ssh/sshd_config; "
-            "sshd -t && systemctl reload ssh"
-        )
+
+        # Management host: only the management interface, no forwarding, no tunnel. Its cloud key
+        # remains for infrastructure access; only the relay key is removed.
         r = self._run_bootstrap_ssh(topology, mgmt_floating_ip, mgmt_floating_ip,
-                                    command_mgmt, direct=True)
+                                    hardening_command("10.0.1.10", False), direct=True)
         if r.returncode != 0:
             raise RuntimeError(f"management SSH hardening failed: {r.stderr.strip()}")
 

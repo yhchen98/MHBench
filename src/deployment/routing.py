@@ -125,6 +125,22 @@ def guest_configurations(topology: NetworkTopology, config: Config,
                 entry["routes"] = [{"to": "0.0.0.0/0", "via": str(gateways[name].gateway)}]
             ethernets[f"mhb_data_{index}"] = entry
         router = routers.get(name)
+        edge_sources = []
+        if router:
+            router_ips = {i.ip_address for i in host.extra_interfaces}
+            for endpoint in routing.host_gateways:
+                if endpoint.gateway not in router_ips:
+                    continue
+                endpoint_host = topology.get_host_by_name(endpoint.host)
+                if endpoint_host.infrastructure:
+                    continue
+                if not (endpoint_host.vm_type.startswith("kali")
+                        or endpoint_host.vm_type.startswith("webserver")):
+                    continue
+                data_ip = next((i.ip_address for i in endpoint_host.extra_interfaces
+                                if i.subnet == endpoint.subnet), None)
+                if data_ip:
+                    edge_sources.append(str(data_ip))
         response_sources = []
         if router:
             for endpoint in routing.host_gateways:
@@ -137,6 +153,7 @@ def guest_configurations(topology: NetworkTopology, config: Config,
             "routing_router": is_router,
             "routing_control_mac": actual["macs"][primary.name].lower(),
             "routing_response_sources": response_sources,
+            "routing_edge_sources": edge_sources,
             "routing_netplan": yaml.safe_dump({"network": {"version": 2, "renderer": "networkd",
                                                          "ethernets": ethernets}}, sort_keys=False),
             "routing_frr": render_frr(topology, router) if router else "",
@@ -144,6 +161,7 @@ def guest_configurations(topology: NetworkTopology, config: Config,
             "routing_origins": [str(p) for p in router.advertised_prefixes] if router else [],
             "routing_c2_hostname": c2_hostname,
             "routing_control_prefixes": [str(p) for p in sorted(prefixes, key=str)],
+            "routing_control_address": f"{host.ip_address}/{primary.cidr.prefixlen}",
         }
     expected = set(routers) | set(gateways)
     if set(result) != expected:

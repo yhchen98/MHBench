@@ -137,7 +137,7 @@ def _install_control_default_guard(ifname: str):
 
 def verify(payload):
     network = payload.get("network", payload)
-    is_router = bool(payload.get("router", False))
+    expected_control = payload.get("expected_control_address")
     names = devices(network)
     addresses = ip_json("-4", "address", "show")
     routes = ip_json("-4", "route", "show")
@@ -152,6 +152,8 @@ def verify(payload):
         if entry.get("dhcp4"):
             if not present:
                 raise ValueError("Guest control DHCP address is missing on " + name)
+            if expected_control and expected_control not in present:
+                raise ValueError(f"Guest control DHCP address is {sorted(present)}, expected {expected_control}")
         elif not set(entry.get("addresses", [])) <= present:
             raise ValueError("Guest data/control addresses do not match " + name)
         for route in entry.get("routes", []):
@@ -161,8 +163,8 @@ def verify(payload):
                        and r.get("gateway") == route["via"] and r.get("dev") == names[name] for r in routes):
                 raise ValueError("Missing guest route " + str(route))
     defaults = [r for r in routes if r["dst"] == "0.0.0.0/0"]
-    expected_count = 0 if is_router else 1
-    if len(expected_defaults) != expected_count or len(defaults) != expected_count:
+    expected_count = len(expected_defaults)
+    if len(defaults) != expected_count:
         raise ValueError(f"Guest must have exactly {expected_count} default route(s)")
     return {"verified": True}
 

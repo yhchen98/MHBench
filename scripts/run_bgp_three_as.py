@@ -317,7 +317,7 @@ class Experiment:
         self.validate_namespace(resources)
         present = any(resources.values())
         require(present if existing else not present,
-                "No deployment to adopt" if existing else "Project already exists; use --existing to verify and delete it")
+                "No deployment to adopt" if existing else "Project already exists; use --existing to adopt it without deleting it")
 
     def provider(self):
         resources = self.resources()
@@ -839,7 +839,7 @@ def main(argv=None):
     parser.add_argument("--project-name", default="bgp-demo")
     parser.add_argument("--scenario", choices=sorted(SCENARIOS), default="baseline",
                         help="Scenario profile: baseline or multistage")
-    parser.add_argument("--existing", action="store_true", help="Adopt an existing deployment; DELETE it after verification")
+    parser.add_argument("--existing", action="store_true", help="Adopt an existing deployment for verification; never delete it")
     parser.add_argument("--verify-only", action="store_true",
                         help="Adopt an existing deployment, run only non-mutating baseline checks, and never tear it down")
     parser.add_argument("--output-dir", type=Path, help="New directory for retained evidence (must not exist)")
@@ -875,7 +875,7 @@ def main(argv=None):
     succeeded = False
     try:
         experiment.namespace(adopt)
-        experiment.owned = not args.verify_only
+        experiment.owned = not adopt
         if args.verify_only:
             experiment.verify_baseline()
         else:

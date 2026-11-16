@@ -46,6 +46,9 @@ else
 fi
 iptables -w 5 -A MHBENCH_INPUT -i "$control_if" -j RETURN
 iptables -w 5 -A MHBENCH_INPUT -i lo -j RETURN
+{% for source in routing_edge_sources %}
+iptables -w 5 -A MHBENCH_INPUT -p tcp --dport 22 -s {{ source }} -j RETURN
+{% endfor %}
 iptables -w 5 -A MHBENCH_INPUT -p tcp --dport 22 -j DROP
 {% for peer in routing_peers %}
 iptables -w 5 -A MHBENCH_INPUT -p tcp --dport 179 -s {{ peer }} -j RETURN

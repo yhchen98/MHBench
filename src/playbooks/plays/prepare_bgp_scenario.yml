@@ -249,7 +249,9 @@
           - StrictHostKeyChecking=no
           - -o
           - UserKnownHostsFile=/dev/null
-          - root@10.200.3.10
+          - -o
+          - ConnectTimeout=10
+          - root@10.250.0.9
           - show ip bgp summary
       register: wrapper_show
       until: wrapper_show.rc == 0
@@ -267,7 +269,9 @@
           - StrictHostKeyChecking=no
           - -o
           - UserKnownHostsFile=/dev/null
-          - root@10.200.3.10
+          - -o
+          - ConnectTimeout=10
+          - root@10.250.0.9
           - id
       register: wrapper_id
       failed_when: wrapper_id.rc == 0
