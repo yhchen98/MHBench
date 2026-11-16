@@ -1,0 +1,54 @@
+---
+- name: Scrub known management exposure from an experimental guest
+  hosts: all
+  remote_user: root
+  become: yes
+  gather_facts: no
+  tasks:
+    - name: Remove the management public key
+      ansible.builtin.lineinfile:
+        path: /root/.ssh/authorized_keys
+        line: "{{ management_key_pub }}"
+        state: absent
+      ignore_errors: true
+
+    - name: Remove management host keys from known_hosts
+      ansible.builtin.shell: |
+        for f in /root/.ssh/known_hosts /home/*/.ssh/known_hosts; do
+          [ -f "$f" ] || continue
+          for ip in {{ management_ips | join(' ') }}; do
+            ssh-keygen -R "$ip" -f "$f" >/dev/null 2>&1 || true
+          done
+        done
+      changed_when: false
+
+    - name: Scrub management references from shell history
+      ansible.builtin.shell: |
+        for f in /root/.bash_history /home/*/.bash_history /root/.zsh_history /home/*/.zsh_history; do
+          [ -f "$f" ] || continue
+          sed -i -E '/10\.0\.1\./d; /172\.30\.240\./d' "$f" || true
+        done
+      changed_when: false
+
+    - name: Remove cloud-init network metadata and DHCP leases
+      ansible.builtin.shell: |
+        rm -f /var/lib/cloud/instances/*/network-config /var/lib/cloud/instances/*/user-data 2>/dev/null || true
+        rm -f /var/lib/dhcp/* /var/lib/NetworkManager/*.lease /run/systemd/netif/leases/* 2>/dev/null || true
+      changed_when: false
+
+    - name: Remove management host entries from /etc/hosts
+      ansible.builtin.shell: |
+        for ip in {{ management_ips | join(' ') }}; do
+          sed -i "\\|$ip|d" /etc/hosts || true
+        done
+      changed_when: false
+
+    - name: Scan supported paths for remaining management references
+      ansible.builtin.shell: |
+        grep -RIlE '10\.0\.1\.|172\.30\.240\.' /root /home /etc/netplan /etc/network /var/lib/cloud /var/lib/dhcp 2>/dev/null || true
+      register: scrub_scan
+      changed_when: false
+
+    - name: Record the bounded scan result
+      ansible.builtin.debug:
+        var: scrub_scan.stdout_lines

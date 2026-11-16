@@ -83,3 +83,5 @@ verify_bgp: src/playbooks/plays/verify_bgp.yml
 prepare_bgp_scenario: src/playbooks/plays/prepare_bgp_scenario.yml
 prepare_bgp_multistage: src/playbooks/plays/prepare_bgp_multistage.yml
 install_kali_attacker: src/playbooks/plays/install_kali_attacker.yml
+install_console_audit: src/playbooks/plays/install_console_audit.yml
+scrub_guest: src/playbooks/plays/scrub_guest.yml

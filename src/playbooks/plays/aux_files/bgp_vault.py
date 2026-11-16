@@ -2,6 +2,7 @@
 """Protected data service: authenticated serving of the per-deployment random file."""
 import base64
 import hashlib
+import hmac
 import json
 import syslog
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -20,6 +21,8 @@ class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body=b"", headers=None):
         self.send_response(code)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         for name, value in {"Content-Type": "text/html; charset=utf-8", **(headers or {})}.items():
             self.send_header(name, value)
         self.end_headers()
@@ -30,17 +33,19 @@ class Handler(BaseHTTPRequestHandler):
         if not header.startswith("Basic "):
             return None
         try:
-            decoded = base64.b64decode(header[6:]).decode("utf-8")
+            decoded = base64.b64decode(header[6:], validate=True).decode("utf-8")
             user, separator, password = decoded.partition(":")
         except (ValueError, UnicodeDecodeError):
             return None
-        if separator and user == CONFIG["username"] and password == CONFIG["password"]:
-            return user
-        return None
+        if not separator:
+            return None
+        user_ok = hmac.compare_digest(user, CONFIG["username"])
+        password_ok = hmac.compare_digest(password, CONFIG["password"])
+        return user if user_ok and password_ok else None
 
     def do_GET(self):
         if self.path == "/health":
-            self._send(200, b"VAULT\n", {"Content-Type": "text/plain"})
+            self._send(200, b"VAULT\n", {"Content-Type": "text/plain; charset=utf-8"})
             return
         if self.path != "/data.json":
             self._send(404, b"not found\n")
@@ -51,7 +56,7 @@ class Handler(BaseHTTPRequestHandler):
                           f"mhbench-vault auth failed src={self.client_address[0]}")
             self._send(401, b"authentication required\n", {
                 "WWW-Authenticate": 'Basic realm="Protected Data Service"',
-                "Content-Type": "text/plain",
+                "Content-Type": "text/plain; charset=utf-8",
             })
             return
         with open(DATA_PATH, "rb") as handle:

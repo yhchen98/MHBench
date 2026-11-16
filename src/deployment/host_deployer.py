@@ -278,9 +278,10 @@ class HostDeployer:
                 forwarding_port = is_router and index > 0
                 groups = []
                 if not forwarding_port:
-                    sg = self._conn.network.find_security_group(self._n(f"{name}_sg"), project_id=self._project_id)
+                    sg_name = f"{host.name}_sg" if host.infrastructure and index == 0 else f"{name}_sg"
+                    sg = self._conn.network.find_security_group(self._n(sg_name), project_id=self._project_id)
                     if sg is None:
-                        raise RuntimeError(f"Routing security group for {name!r} is missing.")
+                        raise RuntimeError(f"Routing security group for {sg_name!r} is missing.")
                     groups = [sg.id]
                 extra = {}
                 if prefixes:
@@ -333,7 +334,8 @@ class HostDeployer:
                 if forwarding_port and port.security_group_ids:
                     raise RuntimeError("Router data ports must not have security groups.")
                 if not forwarding_port:
-                    sg = self._conn.network.find_security_group(self._n(f"{name}_sg"), project_id=self._project_id)
+                    sg_name = f"{host.name}_sg" if host.infrastructure and index == 0 else f"{name}_sg"
+                    sg = self._conn.network.find_security_group(self._n(sg_name), project_id=self._project_id)
                     if sg is None or set(port.security_group_ids) != {sg.id}:
                         raise RuntimeError(f"Host {host.name!r}: interface security groups do not match the topology.")
                 macs[name] = port.mac_address
@@ -464,6 +466,85 @@ class HostDeployer:
         except sdk_exceptions.NotFoundException:
             logger.info("Already gone, skipping: %s", name)
             return False
+
+    def _control_port(self, host: Host):
+        port = self._conn.network.find_port(self._n(f"{host.name}-nic-0"),
+                                            project_id=self._project_id)
+        if port is None:
+            raise RuntimeError(f"Control port for {host.name!r} not found.")
+        return port
+
+    def _control_server(self, host: Host):
+        server = self._conn.compute.find_server(self._n(host.name))
+        if server is None:
+            raise RuntimeError(f"Server for {host.name!r} not found.")
+        return server
+
+    def _wait_control_port(self, port_id: str, attached: bool, timeout: int = 120) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            port = self._conn.network.get_port(port_id)
+            if attached:
+                if port.device_id and port.status == "ACTIVE":
+                    return
+            elif not port.device_id and port.status == "DOWN":
+                return
+            time.sleep(_POLL_INTERVAL)
+        state = self._conn.network.get_port(port_id)
+        raise TimeoutError(
+            f"Control port {port_id} did not become {'attached' if attached else 'detached'} "
+            f"(status={state.status}, device_id={state.device_id!r}).")
+
+    def seal_control_plane(self, topology: NetworkTopology) -> dict:
+        """Detach every non-infrastructure control port; leave data interfaces untouched."""
+        if topology.routing is None:
+            raise NotImplementedError("Control-plane sealing requires a routed topology.")
+        detached, skipped = [], []
+        for host in topology.get_all_hosts():
+            if host.infrastructure:
+                skipped.append(host.name)
+                continue
+            server = self._control_server(host)
+            port = self._control_port(host)
+            if not port.device_id:
+                skipped.append(host.name)
+                continue
+            iface = next((i for i in self._conn.compute.server_interfaces(server)
+                          if i.port_id == port.id), None)
+            if iface is None:
+                raise RuntimeError(f"Control port {port.id} is attached but has no server interface.")
+            self._conn.compute.delete_server_interface(iface, server)
+            self._wait_control_port(port.id, attached=False)
+            detached.append(host.name)
+            logger.info("Sealed control plane for %s", host.name)
+        # Verify the invariant from the provider side, not only from operation success.
+        for host in topology.get_all_hosts():
+            if host.infrastructure:
+                continue
+            port = self._control_port(host)
+            if port.device_id:
+                raise RuntimeError(f"Control port for {host.name!r} is still attached after sealing.")
+        return {"detached": detached, "skipped": skipped}
+
+    def restore_control_plane(self, topology: NetworkTopology) -> dict:
+        """Reattach every detached non-infrastructure control port."""
+        if topology.routing is None:
+            raise NotImplementedError("Control-plane restoration requires a routed topology.")
+        restored, skipped = [], []
+        for host in topology.get_all_hosts():
+            if host.infrastructure:
+                skipped.append(host.name)
+                continue
+            server = self._control_server(host)
+            port = self._control_port(host)
+            if port.device_id:
+                skipped.append(host.name)
+                continue
+            self._conn.compute.create_server_interface(server, port_id=port.id)
+            self._wait_control_port(port.id, attached=True)
+            restored.append(host.name)
+            logger.info("Restored control plane for %s", host.name)
+        return {"restored": restored, "skipped": skipped}
 
     def teardown(self, topology: NetworkTopology) -> None:
         mgmt_name = self._n("management_host")

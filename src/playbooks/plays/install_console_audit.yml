@@ -1,0 +1,37 @@
+---
+- name: Install the console audit marker
+  hosts: all
+  remote_user: root
+  become: yes
+  gather_facts: no
+  tasks:
+    - name: Install the console audit script
+      ansible.builtin.copy:
+        src: aux_files/console_audit.py
+        dest: /usr/local/sbin/mhbench-console-audit
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install the console audit unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/mhbench-console-audit.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=MHBench console audit marker
+          After=network.target
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/sbin/mhbench-console-audit
+          Restart=always
+          RestartSec=5
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Start the console audit marker
+      ansible.builtin.systemd:
+        name: mhbench-console-audit
+        daemon_reload: true
+        enabled: true
+        state: restarted

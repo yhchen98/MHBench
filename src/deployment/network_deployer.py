@@ -157,10 +157,13 @@ class NetworkDeployer:
     def _create_security_groups(self, topology: NetworkTopology) -> None:
         data_names = topology.routing.data_subnet_names(topology) if topology.routing is not None else set()
         endpoint_lans = {g.subnet for g in topology.routing.host_gateways} if topology.routing is not None else set()
-        internal = {str(s.cidr) for s in topology.get_all_subnets() if s.name not in data_names}
+        control_prefixes = {str(s.cidr) for s in topology.get_all_subnets() if s.name not in data_names}
+        internal = set(control_prefixes)
         data_prefixes = {str(s.cidr) for s in topology.get_all_subnets() if s.name in data_names}
         management_source = f"{self._management.host_ip}/32" if self._management else None
-        if management_source:
+        isolate = bool(topology.routing is not None and topology.routing.isolate_management)
+        infrastructure = [h for h in topology.get_all_hosts() if h.infrastructure]
+        if management_source and not isolate:
             internal.add(management_source)
         for subnet in topology.get_all_subnets():
             is_data = subnet.name in data_names
@@ -178,14 +181,35 @@ class NetworkDeployer:
                 self._allow(sg, "ingress", "0.0.0.0/0")
             else:
                 self._allow(sg, "ingress", str(subnet.cidr))
-                if management_source and not is_data:
+                if management_source and not is_data and not isolate:
                     # The bastion forwards defender-requested ports on the control plane.
                     self._allow(sg, "ingress", management_source)
+                if isolate and not is_data:
+                    for host in infrastructure:
+                        self._allow(sg, "ingress", f"{host.ip_address}/32")
                 for connection in topology.get_ingress_connections(subnet.name):
                     source = topology.get_subnet_by_name(connection.from_subnet)
                     for port in connection.ports or [None]:
                         self._allow(sg, "ingress", str(source.cidr), connection.protocol, port)
             logger.info("Security group '%s' ready", self._n(subnet.sg_name))
+
+        for host in infrastructure:
+            # The relay's control port is infrastructure, not an experimental guest. It is reachable only
+            # from the management host and may reach guest control ports; its data port uses the relay SG.
+            logger.info("Creating security group '%s'...", self._n(f"{host.name}_sg"))
+            sg = self._new_security_group(f"{host.name}_sg", f"Infrastructure control SG for {host.name}")
+            for prefix in sorted(control_prefixes | ({management_source} if management_source else set())):
+                self._allow(sg, "egress", prefix)
+            primary = topology.get_subnet_for_host(host)
+            self._allow(sg, "egress", "255.255.255.255/32", "udp", 67)
+            self._allow(sg, "egress", "169.254.169.254/32", "tcp", 80)
+            self._allow(sg, "ingress", str(primary.cidr), "udp", 68)
+            if management_source:
+                self._allow(sg, "ingress", management_source)
+            # The relay reaches its own control SSH through the harness's nested jump; permit the
+            # self-address only for that infrastructure control port.
+            self._allow(sg, "ingress", f"{host.ip_address}/32")
+            logger.info("Security group '%s' ready", self._n(f"{host.name}_sg"))
 
         if self._management:
             mgmt_sg = self._new_security_group("management_sg", "Security group for management network")
@@ -212,6 +236,12 @@ class NetworkDeployer:
             for sg in self._conn.network.security_groups(name=self._n(subnet.sg_name), project_id=pid):
                 self._conn.network.delete_security_group(sg.id)
                 logger.info("Deleted security group: %s", self._n(subnet.sg_name))
+        for host in topology.get_all_hosts():
+            if not host.infrastructure:
+                continue
+            for sg in self._conn.network.security_groups(name=self._n(f"{host.name}_sg"), project_id=pid):
+                self._conn.network.delete_security_group(sg.id)
+                logger.info("Deleted security group: %s", self._n(f"{host.name}_sg"))
 
         for router in self._conn.network.routers(name=self._n("router"), project_id=pid):
             for subnet in topology.get_all_subnets():

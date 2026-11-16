@@ -60,6 +60,32 @@ class DeploymentOrchestrator:
         self._ansible().run_parallel(topology, mgmt_floating_ip)
         logger.info("Configuration complete: %s", topology.name)
 
+    def scrub(self, topology: NetworkTopology, mgmt_floating_ip: str | None) -> None:
+        if mgmt_floating_ip is None:
+            logger.warning("No management IP; skipping guest scrub for %s", topology.name)
+            return
+        logger.info("Scrubbing known management exposure: %s", topology.name)
+        self._ansible().scrub(topology, mgmt_floating_ip)
+
+    def scrub_relay(self, topology: NetworkTopology, mgmt_floating_ip: str | None) -> None:
+        if mgmt_floating_ip is None:
+            logger.warning("No management IP; skipping relay hardening for %s", topology.name)
+            return
+        logger.info("Hardening relay and management SSH: %s", topology.name)
+        self._ansible().scrub_relay(topology, mgmt_floating_ip)
+
+    def seal_control_plane(self, topology: NetworkTopology) -> dict:
+        self._validate_routing(topology)
+        if topology.routing is None or not topology.routing.isolate_management:
+            raise ValueError("Control-plane sealing is only available for routed isolated topologies.")
+        return self._backend.seal_control_plane(topology)
+
+    def restore_control_plane(self, topology: NetworkTopology) -> dict:
+        self._validate_routing(topology)
+        if topology.routing is None:
+            raise ValueError("Control-plane restoration requires a routed topology.")
+        return self._backend.restore_control_plane(topology)
+
     def collect(self, topology: NetworkTopology, mgmt_floating_ip: str | None, dest: str) -> None:
         if mgmt_floating_ip is None:
             logger.info("No management host; skipping log collection for %s", topology.name)

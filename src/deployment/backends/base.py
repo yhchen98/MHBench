@@ -74,6 +74,14 @@ class CloudBackend(ABC):
     def teardown_network(self, topology: NetworkTopology) -> None:
         """Delete the networks, subnets, routing and firewalling for ``topology``."""
 
+    def seal_control_plane(self, topology: NetworkTopology) -> dict:
+        """Detach experimental control ports for an isolated run; return a report."""
+        raise NotImplementedError(f"{self.name} backend does not support control-plane sealing")
+
+    def restore_control_plane(self, topology: NetworkTopology) -> dict:
+        """Reattach control ports detached by seal_control_plane; return a report."""
+        raise NotImplementedError(f"{self.name} backend does not support control-plane restoration")
+
     def routing_interfaces(self, topology: NetworkTopology) -> dict[str, dict]:
         """Return actual interface MACs and control gateways for routed guest configuration."""
         raise NotImplementedError(f"{self.name} backend does not support BGP routing")

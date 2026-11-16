@@ -73,15 +73,18 @@ def guest_configurations(topology: NetworkTopology, config: Config,
     data_names = routing.data_subnet_names(topology)
     routers = {r.host: r for r in routing.routers}
     gateways = {g.host: g for g in routing.host_gateways}
-    controls = {s.cidr for s in topology.get_all_subnets() if s.name not in data_names}
-    controls.add(IPv4Network(config.management.cidr))
-    controls.update(routing.control_routes)
+    all_controls = {s.cidr for s in topology.get_all_subnets() if s.name not in data_names}
+    all_controls.add(IPv4Network(config.management.cidr))
+    all_controls.update(routing.control_routes)
+    infrastructure_hosts = [h for h in topology.get_all_hosts() if h.infrastructure]
+    relay_controls = {topology.get_subnet_for_host(h).cidr for h in infrastructure_hosts}
     c2_hostname = None
     if config.c2c:
         try:
-            controls.add(IPv4Network(f"{IPv4Address(config.c2c.ip)}/32"))
+            all_controls.add(IPv4Network(f"{IPv4Address(config.c2c.ip)}/32"))
         except ValueError:
             c2_hostname = config.c2c.ip
+    controls = (relay_controls | set(routing.control_routes)) if routing.isolate_management else all_controls
     result = {}
     for name, actual in interfaces.items():
         host = topology.get_host_by_name(name)
@@ -89,19 +92,25 @@ def guest_configurations(topology: NetworkTopology, config: Config,
         gateway = IPv4Address(actual["control_gateway"])
         if gateway not in primary.cidr:
             raise ValueError(f"Control gateway for {name!r} is outside its subnet.")
-        prefixes = set(controls)
+        host_controls = all_controls if host.infrastructure else controls
+        prefixes = set(host_controls)
         for dns in primary.dns_servers:
             resolver = IPv4Address(dns)
             if any(resolver in s.cidr for s in topology.get_all_subnets() if s.name in data_names):
                 raise ValueError("Control DNS servers must be outside the data plane.")
-            prefixes.add(IPv4Network(f"{resolver}/32"))
+            if not (routing.isolate_management and not host.infrastructure):
+                prefixes.add(IPv4Network(f"{resolver}/32"))
         is_router = name in routers
+        dynamic_control = routing.isolate_management and not host.infrastructure
         control = {"match": {"macaddress": actual["macs"][primary.name]},
-                   "dhcp4": False, "dhcp6": False, "accept-ra": False, "link-local": [],
-                   "addresses": [f"{host.ip_address}/{primary.cidr.prefixlen}"]}
-        if primary.dns_servers:
-            control["nameservers"] = {"addresses": primary.dns_servers}
-        if is_router:
+                   "dhcp4": dynamic_control, "dhcp6": False, "accept-ra": False, "link-local": []}
+        if dynamic_control:
+            control["dhcp4-overrides"] = {"use-routes": False, "use-dns": False}
+        else:
+            control["addresses"] = [f"{host.ip_address}/{primary.cidr.prefixlen}"]
+            if primary.dns_servers:
+                control["nameservers"] = {"addresses": primary.dns_servers}
+        if is_router and not dynamic_control:
             control["routes"] = [{"to": "0.0.0.0/0", "via": str(gateway)}]
         else:
             control["routes"] = [{"to": str(p), "via": str(gateway)}

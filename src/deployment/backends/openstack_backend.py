@@ -56,6 +56,12 @@ class OpenStackBackend(CloudBackend):
     def provision_hosts(self, topology: NetworkTopology) -> str | None:
         return HostDeployer(self._conn, self._config, self._online, self._project_name).deploy(topology)
 
+    def seal_control_plane(self, topology: NetworkTopology) -> dict:
+        return self._host_deployer().seal_control_plane(topology)
+
+    def restore_control_plane(self, topology: NetworkTopology) -> dict:
+        return self._host_deployer().restore_control_plane(topology)
+
     def routing_interfaces(self, topology: NetworkTopology) -> dict[str, dict]:
         return self._host_deployer().routing_interfaces(topology)
 
