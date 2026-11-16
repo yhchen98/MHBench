@@ -12,6 +12,7 @@ import select
 import socket
 import sys
 import syslog
+import threading
 
 
 def _allow(path: str) -> set[tuple[str, int]]:
@@ -45,27 +46,81 @@ def main() -> int:
         sock = socket.create_connection((host, port), timeout=15)
     except OSError:
         return 1
-    sock.setblocking(False)
+    sock.settimeout(None)
     syslog.syslog(syslog.LOG_INFO, f"mhbench-ssh-proxy {host}:{port}")
     stdin = sys.stdin.buffer
     stdout = sys.stdout.buffer
-    try:
-        while True:
-            readable, _, _ = select.select([stdin, sock], [], [], 300)
+    stop = threading.Event()
+
+    def close() -> None:
+        stop.set()
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def stdin_to_socket() -> None:
+        while not stop.is_set():
+            try:
+                readable, _, _ = select.select([stdin], [], [], 1.0)
+            except (OSError, ValueError):
+                close()
+                return
             if not readable:
                 continue
-            if stdin in readable:
+            try:
                 data = os.read(stdin.fileno(), 65536)
-                if not data:
-                    break
+            except OSError:
+                close()
+                return
+            if not data:
+                try:
+                    sock.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+                return
+            try:
                 sock.sendall(data)
-            if sock in readable:
+            except OSError:
+                close()
+                return
+
+    def socket_to_stdout() -> None:
+        while not stop.is_set():
+            try:
+                readable, _, _ = select.select([sock], [], [], 1.0)
+            except (OSError, ValueError):
+                close()
+                return
+            if not readable:
+                continue
+            try:
                 data = sock.recv(65536)
-                if not data:
-                    break
+            except OSError:
+                close()
+                return
+            if not data:
+                close()
+                return
+            try:
                 stdout.write(data)
                 stdout.flush()
+            except (BrokenPipeError, OSError):
+                close()
+                return
+
+    threads = [
+        threading.Thread(target=stdin_to_socket),
+        threading.Thread(target=socket_to_stdout),
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        while any(thread.is_alive() for thread in threads):
+            for thread in threads:
+                thread.join(0.2)
     finally:
+        close()
         sock.close()
     return 0
 

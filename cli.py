@@ -370,6 +370,20 @@ def restore(ctx: click.Context, spec: Path, project_name: str | None) -> None:
     click.echo(json.dumps(report, sort_keys=True))
 
 
+@cli.command("verify-restoration")
+@click.argument("spec", type=click.Path(exists=True, path_type=Path))
+@click.option("--project-name", default=None, help="Prefix used during provisioning")
+@click.option("--mgmt-ip", required=True, help="Management host floating IP used for forced guest access")
+@click.pass_context
+def verify_restoration(ctx: click.Context, spec: Path, project_name: str | None, mgmt_ip: str) -> None:
+    """Verify guest DHCP, routing, SSH, and Ansible connectivity after restore."""
+    config = _load_config(ctx.obj["config_path"], ctx.obj["ansible_verbosity"])
+    topology = JsonSpecParser().parse(spec)
+    _require_backend_config(config, topology)
+    report = _routed_orchestrator(config, topology, project_name).verify_restoration(topology, mgmt_ip)
+    click.echo(json.dumps(report, sort_keys=True))
+
+
 # ---------------------------------------------------------------------------
 # request-ingress  (defender-requested box ingress)
 # ---------------------------------------------------------------------------

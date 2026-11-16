@@ -264,7 +264,9 @@
           - StrictHostKeyChecking=no
           - -o
           - UserKnownHostsFile=/dev/null
-          - root@10.200.3.10
+          - -o
+          - ConnectTimeout=10
+          - root@10.250.0.17
           - show ip bgp summary
       register: wrapper_show
       until: wrapper_show.rc == 0
@@ -284,7 +286,9 @@
           - StrictHostKeyChecking=no
           - -o
           - UserKnownHostsFile=/dev/null
-          - root@10.200.3.10
+          - -o
+          - ConnectTimeout=10
+          - root@10.250.0.17
           - id
       register: wrapper_id
       failed_when: wrapper_id.rc == 0
@@ -304,7 +308,7 @@
         mode: '0600'
         content: |
           Host edge
-            HostName 10.200.3.10
+            HostName 10.250.0.17
             User root
             IdentityFile ~/.ssh/id_ed25519
             StrictHostKeyChecking no

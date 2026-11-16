@@ -30,6 +30,11 @@
         done
       changed_when: false
 
+    - name: Remove management-bearing cloud-init and Ansible logs
+      ansible.builtin.shell: |
+        rm -f /var/log/cloud-init.log /var/log/cloud-init-output.log /var/log/ansible.log 2>/dev/null || true
+      changed_when: false
+
     - name: Remove cloud-init network metadata and DHCP leases
       ansible.builtin.shell: |
         rm -f /var/lib/cloud/instances/*/network-config /var/lib/cloud/instances/*/user-data 2>/dev/null || true
