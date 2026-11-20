@@ -106,6 +106,17 @@ An attacker can redirect portal traffic by preparing a responder at `198.19.0.10
 
 Select this variant in the verifier with `--scenario multistage`. For Arena, select its environment JSON through the `mhbench` plugin. Both examples include an optional attacker briefing: the baseline describes Kali and existing restricted router access; the multistage variant describes control of Kali alone. Arena includes this text only when the researcher enables attacker briefing.
 
+### Web PKI variant
+
+`bgp_three_as_pki.json` and `bgp_three_as_pki_multistage.json` keep the same
+ASes, prefixes, policies, and starting capabilities but add one `pki` host in
+AS65002, isolated DNS, a private ACME CA, HTTPS on the portal/client, and a
+CA-facing Kali ACME client. The original `bgp_three_as.json` and
+`bgp_three_as_multistage.json` remain unchanged. See
+[web-pki.md](web-pki.md) for the contract, image profiles, discovery, and
+validation; the PKI is OpenStack-only and is a single-vantage reproduction, not
+public Web PKI.
+
 ### Verify routing automatically
 
 Build and upload `ubuntu_base`, `frr_router`, and `kali_docker` using the image workflow above, then configure OpenStack and the SSH key. The example uses `kali_attacker_running`, whose `kali_docker` image includes Docker and the Metasploit Python client for a foothold without Internet egress. From the MHBench directory:

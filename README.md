@@ -170,6 +170,16 @@ mhbench deploy environments/non-generated/chain.json --project-name exp1
 mhbench teardown environments/non-generated/chain.json --project-name exp1 --yes
 ```
 
+## Web PKI for routed experiments
+
+The optional `pki` topology field adds a private CA, authoritative isolated DNS,
+ACME HTTP-01, X.509 certificates, and strictly verified HTTPS to a routed
+topology. The default synthetic identity is Astervale Systems at
+`astervale-systems.com`; all DNS/ACME/HTTP traffic stays inside the experiment.
+See [docs/web-pki.md](docs/web-pki.md) for the schema, image profiles, bootstrap
+order, discovery path, validation, and single-vantage limitations. Omission of
+`pki` preserves the original HTTP/8080 behavior.
+
 ## Layout
 
 ```
