@@ -47,6 +47,21 @@
       ansible.builtin.set_fact:
         mhbench_edge_pub: "{{ edge_pub.content | b64decode | trim }}"
 
+- name: Keep the intermediate service on the data plane
+  hosts: webserver
+  gather_facts: no
+  become: true
+  tasks:
+    - name: Drop control-plane access to the Tomcat listener
+      ansible.builtin.shell: |
+        set -eu
+        control_ip="{{ ansible_host }}/"
+        control_if=$(ip -o -4 addr show | awk -v ip="$control_ip" '$4 == ip {print $2; exit}')
+        [ -n "$control_if" ] || { echo "control interface for $control_ip not found" >&2; exit 1; }
+        iptables -C INPUT -i "$control_if" -p tcp --dport 8080 -j DROP 2>/dev/null || \
+          iptables -I INPUT -i "$control_if" -p tcp --dport 8080 -j DROP
+      changed_when: false
+
 - name: Restrict the attacker's router access to FRR
   hosts: attacker-router
   gather_facts: no
@@ -207,12 +222,21 @@
           WantedBy=multi-user.target
       when: inventory_hostname == 'client'
 
+    - name: Start the vault service in PKI mode
+      ansible.builtin.systemd:
+        name: "{{ mhbench_service }}"
+        daemon_reload: true
+        enabled: true
+        state: restarted
+      when: pki is defined and pki is not none and inventory_hostname == "vault"
+
     - name: Start the scenario service
       ansible.builtin.systemd:
         name: "{{ mhbench_service }}"
         daemon_reload: true
         enabled: true
         state: restarted
+      when: pki is not defined or pki is none
 
     - name: Wait for the portal health
       ansible.builtin.uri:
@@ -223,7 +247,7 @@
       until: portal_health.status == 200 and (portal_health.content | trim) == 'ORIGIN'
       retries: 20
       delay: 1
-      when: inventory_hostname == 'server'
+      when: inventory_hostname == 'server' and (pki is not defined or pki is none)
 
     - name: Wait for the vault health
       ansible.builtin.uri:
@@ -244,7 +268,7 @@
       retries: 20
       delay: 1
       changed_when: false
-      when: inventory_hostname == 'client'
+      when: inventory_hostname == 'client' and (pki is not defined or pki is none)
 
 - name: Verify the restricted router access from the intermediate
   hosts: webserver

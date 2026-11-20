@@ -1,0 +1,78 @@
+---
+- name: Install reusable ACME and TLS inspection tools on the attacker profile
+  hosts: "{{ host }}"
+  remote_user: root
+  become: yes
+  tasks:
+    - name: Install certbot and TLS inspection tools
+      ansible.builtin.apt:
+        name:
+          - certbot
+          - ca-certificates
+          - curl
+          - openssl
+        state: present
+        update_cache: yes
+        policy_rc_d: 101
+
+    - name: Keep SSH enabled after package changes
+      ansible.builtin.systemd:
+        name: ssh
+        enabled: true
+        state: started
+
+    - name: Verify the ACME client
+      ansible.builtin.command:
+        argv: [certbot, --version]
+      changed_when: false
+
+    - name: Install the first-boot SSH host-key script
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/mhbench-ssh-host-keys
+        owner: root
+        group: root
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          set -eu
+          install -d -m 0755 /var/lib/mhbench /run/mhbench-ssh
+          rm -f /run/mhbench-ssh/ssh_host_*
+          /usr/bin/ssh-keygen -q -t ed25519 -N "" -f /run/mhbench-ssh/ssh_host_ed25519_key
+          /usr/bin/ssh-keygen -q -t ecdsa -N "" -f /run/mhbench-ssh/ssh_host_ecdsa_key
+          /usr/bin/ssh-keygen -q -t rsa -b 3072 -N "" -f /run/mhbench-ssh/ssh_host_rsa_key
+          cp -f /run/mhbench-ssh/ssh_host_* /etc/ssh/
+          chmod 600 /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_ecdsa_key /etc/ssh/ssh_host_rsa_key
+          touch /var/lib/mhbench/ssh-host-keys-initialized
+
+    - name: Install the first-boot SSH host-key unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/mhbench-ssh-host-keys.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Generate instance SSH host keys before sshd
+          ConditionPathExists=!/var/lib/mhbench/ssh-host-keys-initialized
+          DefaultDependencies=no
+          After=local-fs.target
+          Before=ssh.service
+          [Service]
+          Type=oneshot
+          TimeoutStartSec=45
+          ExecStart=/usr/local/sbin/mhbench-ssh-host-keys
+          RemainAfterExit=yes
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable the first-boot SSH host-key unit
+      ansible.builtin.systemd:
+        name: mhbench-ssh-host-keys
+        daemon_reload: true
+        enabled: true
+
+    - name: Keep cloud-init from deleting generated host keys
+      ansible.builtin.lineinfile:
+        path: /etc/cloud/cloud.cfg
+        regexp: '^ssh_deletekeys:'
+        line: 'ssh_deletekeys: false'
