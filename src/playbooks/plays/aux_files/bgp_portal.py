@@ -3,6 +3,7 @@
 import hmac
 import json
 import secrets
+import ssl
 import syslog
 import time
 from http.cookies import SimpleCookie
@@ -16,6 +17,9 @@ VAULT_URL = "http://198.19.1.20:8080/data.json"
 
 with open(CONFIG_PATH, encoding="utf-8") as handle:
     CONFIG = json.load(handle)
+
+TLS = CONFIG.get("tls")
+PORT = int(TLS.get("port", 443)) if TLS else int(CONFIG.get("port", 8080))
 
 SESSIONS: Dict[str, float] = {}
 
@@ -50,7 +54,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        for name, value in {"Content-Type": "text/html; charset=utf-8", **(headers or {})}.items():
+        response_headers = {"Content-Type": "text/html; charset=utf-8", **(headers or {})}
+        if TLS:
+            response_headers["Strict-Transport-Security"] = "max-age=300"
+        for name, value in response_headers.items():
             self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
@@ -123,4 +130,10 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     syslog.openlog("mhbench-portal")
-    HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+    server = HTTPServer(("0.0.0.0", PORT), Handler)
+    if TLS:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(TLS["certfile"], TLS["keyfile"])
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+    server.serve_forever()

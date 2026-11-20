@@ -1,0 +1,14 @@
+---
+- name: Install the ACME client for the portal
+  hosts: "{{ host }}"
+  remote_user: root
+  become: yes
+  tasks:
+    - name: Install certbot
+      ansible.builtin.apt:
+        name:
+          - certbot
+          - ca-certificates
+        state: present
+        update_cache: yes
+        policy_rc_d: 101

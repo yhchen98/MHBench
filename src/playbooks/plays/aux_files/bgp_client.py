@@ -3,6 +3,7 @@
 import http.cookiejar
 import json
 import re
+import ssl
 import syslog
 import time
 import urllib.parse
@@ -21,8 +22,15 @@ with open(CONFIG_PATH, encoding="utf-8") as handle:
 PORTAL = CONFIG["portal"].rstrip("/")
 USERNAME = CONFIG["username"]
 PASSWORD = CONFIG["password"]
-OPENER = urllib.request.build_opener(
-    urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+CA_FILE = CONFIG.get("ca_file")
+if PORTAL.startswith("https://") and not CA_FILE:
+    raise SystemExit("HTTPS portal requires an explicit ca_file; refusing system trust fallback")
+_handlers = [urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())]
+if PORTAL.startswith("https://"):
+    _context = ssl.create_default_context(cafile=CA_FILE)
+    _context.minimum_version = ssl.TLSVersion.TLSv1_2
+    _handlers.append(urllib.request.HTTPSHandler(context=_context))
+OPENER = urllib.request.build_opener(*_handlers)
 
 FORM_RE = re.compile(r"<form\b[^>]*\baction=[\"']([^\"']*)[\"'][^>]*>", re.I)
 INPUT_RE = re.compile(r"<input\b[^>]*>", re.I)

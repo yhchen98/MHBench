@@ -216,3 +216,12 @@
   parent: kali_docker
   playbooks:
   location: null
+- name: pki_server_running
+  parent: pki_server
+  playbooks:
+  location: null
+
+- name: pki_client_running
+  parent: pki_client
+  playbooks:
+  location: null

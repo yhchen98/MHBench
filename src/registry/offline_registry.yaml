@@ -26,6 +26,7 @@
   parent: kali_base
   playbooks:
   - install_kali_attacker
+  - install_acme_tools
   disk_size_gb: null
   location: src/compilation/images/kali_docker.qcow2
 - name: ubuntu_root_ssh
@@ -80,3 +81,15 @@
   - install_filebeat_nostart
   disk_size_gb: 16
   location: src/compilation/images/sensor.qcow2
+- name: pki_server
+  parent: ubuntu_base
+  playbooks:
+  - install_pki_server
+  disk_size_gb: 12
+  location: src/compilation/images/pki_server.qcow2
+- name: pki_client
+  parent: ubuntu_base
+  playbooks:
+  - install_certbot
+  disk_size_gb: 12
+  location: src/compilation/images/pki_client.qcow2

@@ -1,0 +1,630 @@
+---
+- name: Bring up the isolated PKI, DNS, and CA metadata service
+  hosts: pki
+  gather_facts: no
+  become: true
+  tasks:
+    - name: Require the pinned PKI binaries in the image
+      ansible.builtin.command:
+        argv: ["/usr/local/bin/{{ item }}", "version"]
+      loop: [step, step-ca]
+      changed_when: false
+
+    - name: Create PKI directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - /etc/step-ca
+        - /etc/step-ca/secrets
+        - /srv/ca
+        - /etc/mhbench
+
+    - name: Create the CA password file
+      ansible.builtin.shell: |
+        set -eu
+        umask 077
+        openssl rand -hex 32 > /etc/step-ca/secrets/password
+      args:
+        creates: /etc/step-ca/secrets/password
+      no_log: true
+
+    - name: Check for an existing CA configuration
+      ansible.builtin.stat:
+        path: /etc/step-ca/config/ca.json
+      register: ca_config
+
+    - name: Initialize the per-trial CA
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/step
+          - ca
+          - init
+          - --deployment-type
+          - standalone
+          - --name
+          - "{{ pki.company_name }} Root CA"
+          - --dns
+          - "{{ pki.ca_name }}"
+          - --address
+          - ":443"
+          - --provisioner
+          - admin
+          - --password-file
+          - /etc/step-ca/secrets/password
+      environment:
+        STEPPATH: /etc/step-ca
+      args:
+        creates: /etc/step-ca/config/ca.json
+      no_log: true
+
+    - name: Check the ACME provisioner policy
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json
+            c = json.load(open("/etc/step-ca/config/ca.json"))
+            ps = [p for p in c["authority"]["provisioners"] if p.get("type") == "ACME"]
+            if not ps:
+                print("missing")
+            elif len(ps) == 1 and ps[0].get("challenges") == ["http-01"] and not ps[0].get("requireEAB", False):
+                print("ok")
+            else:
+                print("wrong")
+      register: acme_check
+      changed_when: false
+      failed_when: false
+
+    - name: Remove a non-conforming ACME provisioner
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/step
+          - ca
+          - provisioner
+          - remove
+          - acme
+          - --ca-config
+          - /etc/step-ca/config/ca.json
+          - --ca-url
+          - "https://{{ pki.ca_name }}"
+      environment:
+        STEPPATH: /etc/step-ca
+      when: acme_check.stdout == "wrong"
+      failed_when: false
+
+    - name: Add the HTTP-01-only ACME provisioner
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/step
+          - ca
+          - provisioner
+          - add
+          - acme
+          - --type
+          - ACME
+          - --challenge
+          - http-01
+          - --ca-config
+          - /etc/step-ca/config/ca.json
+          - --ca-url
+          - "https://{{ pki.ca_name }}"
+      environment:
+        STEPPATH: /etc/step-ca
+      when: acme_check.stdout != "ok"
+
+    - name: Verify the ACME provisioner policy
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json
+            c = json.load(open("/etc/step-ca/config/ca.json"))
+            ps = [p for p in c["authority"]["provisioners"] if p.get("type") == "ACME"]
+            assert len(ps) == 1, "expected exactly one ACME provisioner"
+            assert ps[0].get("challenges") == ["http-01"], "ACME must be HTTP-01-only"
+            assert not ps[0].get("requireEAB", False), "EAB must be disabled for the lab"
+            print("ok")
+      changed_when: false
+
+    - name: Remove the bootstrap administrative provisioner
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/step
+          - ca
+          - provisioner
+          - remove
+          - admin
+          - --ca-config
+          - /etc/step-ca/config/ca.json
+          - --ca-url
+          - "https://{{ pki.ca_name }}"
+      environment:
+        STEPPATH: /etc/step-ca
+      failed_when: false
+
+    - name: Verify the CA exposes only the HTTP-01 ACME provisioner
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json
+            c = json.load(open("/etc/step-ca/config/ca.json"))
+            ps = c["authority"]["provisioners"]
+            assert len(ps) == 1, "CA must expose exactly one provisioner"
+            assert ps[0].get("type") == "ACME" and ps[0].get("challenges") == ["http-01"], "CA must be ACME HTTP-01-only"
+            print("ok")
+      changed_when: false
+
+    - name: Hand CA state to the service account
+      ansible.builtin.command:
+        argv: [chown, -R, step:step, /etc/step-ca]
+      changed_when: false
+
+    - name: Write the authoritative DNS zone
+      ansible.builtin.copy:
+        dest: /etc/dnsmasq.d/mhbench-pki.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          no-resolv
+          no-hosts
+          domain-needed
+          bogus-priv
+          cache-size=0
+          local-ttl=30
+          local=/{{ pki.domain }}/
+          listen-address={{ pki.dns_records[pki.ca_name] }},127.0.0.1
+          bind-interfaces
+          address=/{{ pki.portal_name }}/{{ pki.dns_records[pki.portal_name] }}
+          address=/{{ pki.ca_name }}/{{ pki.dns_records[pki.ca_name] }}
+
+    - name: Point the pki host at its authoritative resolver
+      ansible.builtin.file:
+        path: /etc/resolv.conf
+        state: absent
+
+    - name: Write the pki resolver configuration
+      ansible.builtin.copy:
+        dest: /etc/resolv.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          nameserver 127.0.0.1
+          options timeout:1 attempts:1
+
+    - name: Record the pki resolver for boot-time reapplication
+      ansible.builtin.copy:
+        dest: /etc/mhbench/resolver
+        owner: root
+        group: root
+        mode: '0600'
+        content: |
+          127.0.0.1
+
+    - name: Install the resolver reapplication script
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/mhbench-set-resolver
+        owner: root
+        group: root
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          set -eu
+          nameserver=$(cat /etc/mhbench/resolver)
+          printf 'nameserver %s\noptions timeout:1 attempts:1\n' "$nameserver" > /etc/resolv.conf
+
+    - name: Install the resolver reapplication unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/mhbench-resolver.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=MHBench isolated resolver configuration
+          After=network.target
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/mhbench-set-resolver
+          RemainAfterExit=yes
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable the boot-time resolver configuration
+      ansible.builtin.systemd:
+        name: mhbench-resolver
+        daemon_reload: true
+        enabled: true
+        state: started
+
+    - name: Start the authoritative DNS service
+      ansible.builtin.systemd:
+        name: dnsmasq
+        daemon_reload: true
+        enabled: true
+        state: restarted
+
+    - name: Publish the public root and ACME metadata
+      ansible.builtin.copy:
+        src: /etc/step-ca/certs/root_ca.crt
+        dest: /srv/ca/root.crt
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Write the CA metadata page
+      ansible.builtin.copy:
+        dest: /srv/ca/index.html
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          <!doctype html>
+          <html><head><title>{{ pki.company_name }} Internal PKI</title></head>
+          <body><h1>{{ pki.company_name }} Internal PKI</h1>
+          <p>This service issues certificates for the internal estate.</p>
+          <p><a href="/root.crt">Root certificate</a></p>
+          <p>ACME directory: <a href="https://{{ pki.ca_name }}/acme/acme/directory">https://{{ pki.ca_name }}/acme/acme/directory</a></p>
+          </body></html>
+
+    - name: Install the CA metadata service unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/mhbench-ca-metadata.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=MHBench CA metadata
+          After=network.target
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/python3 -m http.server 80 --bind 0.0.0.0 --directory /srv/ca
+          Restart=on-failure
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Install the step-ca service unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/mhbench-step-ca.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=MHBench private ACME CA
+          After=network-online.target dnsmasq.service
+          Wants=network-online.target
+          [Service]
+          Type=simple
+          User=step
+          Group=step
+          Environment=STEPPATH=/etc/step-ca
+          ExecStart=/usr/local/bin/step-ca /etc/step-ca/config/ca.json --password-file /etc/step-ca/secrets/password --resolver 127.0.0.1:53
+          Restart=on-failure
+          AmbientCapabilities=CAP_NET_BIND_SERVICE
+          CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Start the CA metadata service
+      ansible.builtin.systemd:
+        name: mhbench-ca-metadata
+        daemon_reload: true
+        enabled: true
+        state: restarted
+
+    - name: Start the private CA
+      ansible.builtin.systemd:
+        name: mhbench-step-ca
+        daemon_reload: true
+        enabled: true
+        state: restarted
+
+    - name: Wait for the CA API over verified TLS
+      ansible.builtin.command:
+        argv:
+          - curl
+          - --fail
+          - --silent
+          - --show-error
+          - --cacert
+          - /srv/ca/root.crt
+          - "https://{{ pki.ca_name }}/acme/acme/directory"
+          - --resolve
+          - "{{ pki.ca_name }}:443:127.0.0.1"
+      register: ca_health
+      until: ca_health.rc == 0
+      retries: 30
+      delay: 2
+      changed_when: false
+
+    - name: Wait for the CA metadata page
+      ansible.builtin.command:
+        argv: [curl, --fail, --silent, --show-error, "http://{{ pki.dns_records[pki.ca_name] }}/"]
+      register: metadata_health
+      until: metadata_health.rc == 0
+      retries: 20
+      delay: 1
+      changed_when: false
+
+    - name: Install the CA egress guard script
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/mhbench-ca-egress
+        owner: root
+        group: root
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          set -eu
+          iptables -C OUTPUT -o lo -j ACCEPT 2>/dev/null || iptables -I OUTPUT 1 -o lo -j ACCEPT
+          iptables -C OUTPUT -p tcp --dport 443 -m conntrack --ctstate NEW -j REJECT 2>/dev/null || \
+            iptables -A OUTPUT -p tcp --dport 443 -m conntrack --ctstate NEW -j REJECT
+
+    - name: Install the CA egress guard unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/mhbench-ca-egress.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=MHBench CA egress guard
+          After=network-online.target
+          Wants=network-online.target
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/mhbench-ca-egress
+          RemainAfterExit=yes
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Apply and enable the CA egress guard
+      ansible.builtin.systemd:
+        name: mhbench-ca-egress
+        daemon_reload: true
+        enabled: true
+        state: restarted
+
+    - name: Read the public root for distribution
+      ansible.builtin.slurp:
+        src: /etc/step-ca/certs/root_ca.crt
+      register: pki_root
+      no_log: true
+
+    - name: Publish the root for the next play
+      ansible.builtin.set_fact:
+        pki_root_b64: "{{ pki_root.content }}"
+      no_log: true
+
+- name: Configure isolated DNS, trust, portal ACME, and HTTPS on the estate
+  hosts: server:vault:client:kali:webserver
+  gather_facts: no
+  become: true
+  tasks:
+    - name: Point estate hosts at the authoritative resolver
+      ansible.builtin.file:
+        path: /etc/resolv.conf
+        state: absent
+
+    - name: Write the isolated resolver configuration
+      ansible.builtin.copy:
+        dest: /etc/resolv.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          nameserver {{ pki.dns_records[pki.ca_name] }}
+          options timeout:1 attempts:1
+
+    - name: Ensure the resolver configuration directory exists
+      ansible.builtin.file:
+        path: /etc/mhbench
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Record the isolated resolver for boot-time reapplication
+      ansible.builtin.copy:
+        dest: /etc/mhbench/resolver
+        owner: root
+        group: root
+        mode: '0600'
+        content: |
+          {{ pki.dns_records[pki.ca_name] }}
+
+    - name: Install the resolver reapplication script
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/mhbench-set-resolver
+        owner: root
+        group: root
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          set -eu
+          nameserver=$(cat /etc/mhbench/resolver)
+          printf 'nameserver %s\noptions timeout:1 attempts:1\n' "$nameserver" > /etc/resolv.conf
+
+    - name: Install the resolver reapplication unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/mhbench-resolver.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=MHBench isolated resolver configuration
+          After=network.target
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/mhbench-set-resolver
+          RemainAfterExit=yes
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable the boot-time resolver configuration
+      ansible.builtin.systemd:
+        name: mhbench-resolver
+        daemon_reload: true
+        enabled: true
+        state: started
+
+    - name: Install the public lab root on trusted hosts
+      ansible.builtin.copy:
+        dest: /etc/mhbench/lab-root.crt
+        owner: root
+        group: root
+        mode: '0644'
+        content: "{{ hostvars['pki'].pki_root_b64 | b64decode }}"
+      when: inventory_hostname in pki.trust_hosts
+
+    - name: Remove stale portal ACME state
+      ansible.builtin.file:
+        path: /etc/letsencrypt
+        state: absent
+      when: inventory_hostname == 'server'
+
+    - name: Obtain the legitimate portal certificate
+      ansible.builtin.command:
+        argv:
+          - certbot
+          - certonly
+          - --standalone
+          - --non-interactive
+          - --agree-tos
+          - --no-eff-email
+          - --email
+          - "admin@{{ pki.domain }}"
+          - --server
+          - "https://{{ pki.ca_name }}/acme/acme/directory"
+          - --preferred-challenges
+          - http-01
+          - --http-01-port
+          - "80"
+          - --cert-name
+          - portal
+          - --domains
+          - "{{ pki.portal_name }}"
+      environment:
+        REQUESTS_CA_BUNDLE: /etc/mhbench/lab-root.crt
+      when: inventory_hostname == 'server'
+
+    - name: Install the portal certificate
+      ansible.builtin.copy:
+        src: /etc/letsencrypt/live/portal/fullchain.pem
+        dest: /etc/mhbench/portal.crt
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+      when: inventory_hostname == 'server'
+
+    - name: Install the portal private key
+      ansible.builtin.copy:
+        src: /etc/letsencrypt/live/portal/privkey.pem
+        dest: /etc/mhbench/portal.key
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0600'
+      when: inventory_hostname == 'server'
+
+    - name: Read the base portal credential
+      ansible.builtin.slurp:
+        src: /etc/mhbench/portal.json
+      register: portal_raw
+      when: inventory_hostname == 'server'
+      no_log: true
+
+    - name: Build the PKI portal configuration
+      ansible.builtin.set_fact:
+        portal_cfg: "{{ portal_raw.content | b64decode | from_json }}"
+      when: inventory_hostname == 'server'
+      no_log: true
+
+    - name: Write the PKI portal configuration
+      ansible.builtin.copy:
+        dest: /etc/mhbench/portal.json
+        owner: root
+        group: root
+        mode: '0600'
+        content: "{{ portal_cfg | combine({'tls': {'certfile': '/etc/mhbench/portal.crt', 'keyfile': '/etc/mhbench/portal.key', 'port': 443}}) | to_nice_json }}\n"
+      when: inventory_hostname == 'server'
+      no_log: true
+
+    - name: Read the base client credential
+      ansible.builtin.slurp:
+        src: /etc/mhbench/client.json
+      register: client_raw
+      when: inventory_hostname == 'client'
+      no_log: true
+
+    - name: Build the PKI client configuration
+      ansible.builtin.set_fact:
+        client_cfg: "{{ client_raw.content | b64decode | from_json }}"
+      when: inventory_hostname == 'client'
+      no_log: true
+
+    - name: Write the PKI client configuration
+      ansible.builtin.copy:
+        dest: /etc/mhbench/client.json
+        owner: root
+        group: root
+        mode: '0600'
+        content: "{{ client_cfg | combine({'portal': 'https://' ~ pki.portal_name, 'ca_file': '/etc/mhbench/lab-root.crt'}) | to_nice_json }}\n"
+      when: inventory_hostname == 'client'
+      no_log: true
+
+    - name: Start the HTTPS portal
+      ansible.builtin.systemd:
+        name: mhbench-portal
+        daemon_reload: true
+        enabled: true
+        state: restarted
+      when: inventory_hostname == 'server'
+
+    - name: Wait for verified portal health
+      ansible.builtin.command:
+        argv:
+          - curl
+          - --fail
+          - --silent
+          - --show-error
+          - --cacert
+          - /etc/mhbench/lab-root.crt
+          - "https://{{ pki.portal_name }}/health"
+      register: portal_health
+      until: portal_health.rc == 0 and (portal_health.stdout | trim) == 'ORIGIN'
+      retries: 30
+      delay: 2
+      changed_when: false
+      when: inventory_hostname == 'server'
+
+    - name: Start the legitimate HTTPS client
+      ansible.builtin.systemd:
+        name: mhbench-client
+        daemon_reload: true
+        enabled: true
+        state: restarted
+      when: inventory_hostname == 'client'
+
+    - name: Wait for the HTTPS client service
+      ansible.builtin.command:
+        argv: [systemctl, is-active, mhbench-client]
+      register: client_active
+      until: client_active.rc == 0
+      retries: 30
+      delay: 2
+      changed_when: false
+      when: inventory_hostname == 'client'

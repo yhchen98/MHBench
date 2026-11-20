@@ -28,6 +28,8 @@ class JsonSpecParser:
         for host in topology.get_all_hosts():
             if host.vm_type not in known:
                 errors.append(f"Host '{host.name}': vm_type '{host.vm_type}' not found in any registry.")
+        if topology.pki is not None and config is not None and config.backend != "openstack":
+            errors.append(f"Web PKI is not supported by the {config.backend} backend; use OpenStack.")
         if topology.routing is not None:
             for router in topology.routing.routers:
                 host = topology.get_host_by_name(router.host)
@@ -42,13 +44,17 @@ class JsonSpecParser:
 
     @staticmethod
     def validate_config(topology: NetworkTopology, config: Config) -> list[str]:
-        if topology.routing is None:
-            return []
-        if config.backend != "openstack":
-            return [f"BGP routing is not supported by the {config.backend} backend; use OpenStack."]
-        if config.management is None:
-            return ["BGP environments require a management host."]
         errors = []
+        if topology.pki is not None and config.backend != "openstack":
+            errors.append(f"Web PKI is not supported by the {config.backend} backend; use OpenStack.")
+        if topology.routing is None:
+            return errors
+        if config.backend != "openstack":
+            errors.append(f"BGP routing is not supported by the {config.backend} backend; use OpenStack.")
+            return errors
+        if config.management is None:
+            errors.append("BGP environments require a management host.")
+            return errors
         try:
             management = IPv4Network(config.management.cidr)
             address = IPv4Address(config.management.host_ip)

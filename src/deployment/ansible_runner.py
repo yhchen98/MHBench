@@ -181,6 +181,13 @@ class AnsibleRunner:
             if logf:
                 logf.close()
 
+    @staticmethod
+    def _pki_extravars(topology: NetworkTopology) -> dict:
+        """Pass the optional PKI contract only to topology plays when one is declared."""
+        if topology.pki is None:
+            return {}
+        return {"pki": topology.pki.model_dump(mode="json")}
+
     def _configure_routing(self, topology: NetworkTopology, inventory_hosts: dict) -> None:
         if topology.routing is None or self._attacker_only:
             return
@@ -261,7 +268,8 @@ class AnsibleRunner:
                 extravars = (
                     {"host": host_name, **args, "mhb_project": self._project_name}
                     if host_name
-                    else {**args, "mhb_project": self._project_name}
+                    else {**args, "mhb_project": self._project_name,
+                          **self._pki_extravars(topology)}
                 )
                 if host_name:
                     logger.info("Running playbook '%s' on '%s'", pb_name, host_name)
@@ -781,7 +789,8 @@ Match all
                         # the one that decides whether the flag carries the
                         # experiment name or an empty string.
                         self._run_playbook(pb_name, {"all": {"hosts": inventory_hosts}},
-                                           {**args, "mhb_project": self._project_name},
+                                           {**args, "mhb_project": self._project_name,
+                                            **self._pki_extravars(topology)},
                                            tmp, project_dir, log_path)
                 finally:
                     for lk in reversed(held):

@@ -1,0 +1,89 @@
+---
+- name: Install the private CA, DNS, and CA metadata dependencies
+  hosts: "{{ host }}"
+  remote_user: root
+  become: yes
+  vars:
+    step_version: "0.31.0"
+    step_sha256: "2bc654b26ca467848edb764620d6f17febea9d7d3629368b76dd20ce40c6ef32"
+    step_ca_version: "0.30.2"
+    step_ca_sha256: "1726ee7b6a24c67abb8c9e96ad671623b29b3d34f6a712f7087495f31331e54b"
+  tasks:
+    - name: Install base runtime dependencies
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - dnsmasq
+          - iptables
+          - openssl
+          - python3
+          - unzip
+        state: present
+        update_cache: yes
+        policy_rc_d: 101
+
+    - name: Download pinned step CLI
+      ansible.builtin.get_url:
+        url: "https://github.com/smallstep/cli/releases/download/v{{ step_version }}/step_linux_amd64.tar.gz"
+        dest: /tmp/mhbench-step.tar.gz
+        checksum: "sha256:{{ step_sha256 }}"
+        mode: '0644'
+        force: no
+
+    - name: Extract pinned step CLI
+      ansible.builtin.unarchive:
+        src: /tmp/mhbench-step.tar.gz
+        dest: /tmp
+        remote_src: yes
+        creates: /tmp/step_linux_amd64/bin/step
+
+    - name: Install step CLI
+      ansible.builtin.copy:
+        src: /tmp/step_linux_amd64/bin/step
+        dest: /usr/local/bin/step
+        remote_src: yes
+        mode: '0755'
+
+    - name: Download pinned step-ca
+      ansible.builtin.get_url:
+        url: "https://github.com/smallstep/certificates/releases/download/v{{ step_ca_version }}/step-ca_linux_amd64.tar.gz"
+        dest: /tmp/mhbench-step-ca.tar.gz
+        checksum: "sha256:{{ step_ca_sha256 }}"
+        mode: '0644'
+        force: no
+
+    - name: Extract pinned step-ca
+      ansible.builtin.unarchive:
+        src: /tmp/mhbench-step-ca.tar.gz
+        dest: /tmp
+        remote_src: yes
+        creates: /tmp/step-ca_linux_amd64/step-ca
+
+    - name: Install step-ca
+      ansible.builtin.copy:
+        src: /tmp/step-ca_linux_amd64/step-ca
+        dest: /usr/local/bin/step-ca
+        remote_src: yes
+        mode: '0755'
+
+    - name: Create the unprivileged CA service account
+      ansible.builtin.user:
+        name: step
+        system: yes
+        create_home: no
+        shell: /usr/sbin/nologin
+
+    - name: Keep DNS stopped at bake time
+      ansible.builtin.systemd:
+        name: dnsmasq
+        state: stopped
+        enabled: no
+
+    - name: Verify the installed tools
+      ansible.builtin.command:
+        argv: ["{{ item }}", "version"]
+      loop:
+        - /usr/local/bin/step
+        - /usr/local/bin/step-ca
+      changed_when: false
